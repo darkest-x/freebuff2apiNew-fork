@@ -129,6 +129,8 @@ GEMINI_FREE_MODELS: tuple[FreebuffModel, ...] = (
 )
 
 HARDCODED_MODELS = FREEBUFF_MODELS + GEMINI_FREE_MODELS
+# 兼容旧引用（admin.py overview 等仍导入 ALL_MODELS）。
+ALL_MODELS = HARDCODED_MODELS
 
 # 运行时动态注册表：模块导入即创建，并启动后台线程抓取一次官方模型映射。
 # 抓取完成前 resolve_model 回退硬编码表，不阻塞服务启动。
