@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import urllib.request
+import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,6 +155,7 @@ class Settings:
     debug: bool = False
     log_level: str = "INFO"
     log_body_chars: int = 2000
+    log_plaintext: bool = False
     log_color: bool = True
     admin_log_lines: int = 1000
     host: str = "0.0.0.0"
@@ -257,6 +258,7 @@ def load_settings() -> Settings:
         debug=debug,
         log_level=log_level,
         log_body_chars=_int("FREEBUFF_LOG_BODY_CHARS", 0 if debug else 2000),
+        log_plaintext=_bool("FREEBUFF_LOG_PLAINTEXT", False),
         log_color=_bool("FREEBUFF_LOG_COLOR", color_default),
         admin_log_lines=_int("FREEBUFF_ADMIN_LOG_LINES", 1000),
         host=os.getenv("FREEBUFF_HOST", "0.0.0.0"),
