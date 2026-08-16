@@ -15,6 +15,8 @@ import type {
   RequestsData,
   RequestStats,
   ChatTestResult,
+  GeoInfo,
+  GeoRefreshResult,
 } from "@/types"
 
 const API_BASE = "/admin/api"
@@ -79,6 +81,12 @@ export const api = {
   config: () => request<ConfigPayload>("/config"),
 
   env: () => request<EnvData>("/env"),
+
+  // Geo / device fingerprint
+  geo: () => request<GeoInfo>("/geo"),
+
+  refreshGeo: () =>
+    request<GeoRefreshResult>("/geo/refresh", { method: "POST" }),
 
   // Models
   models: () => request<ModelsResponse>("/models"),
