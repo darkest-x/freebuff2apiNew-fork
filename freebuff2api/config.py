@@ -65,14 +65,15 @@ def _locale_for_country(country_code: str) -> str:
 def detect_geo(timeout: float = 4.0) -> dict[str, str]:
     """Detect server public-IP geo (timezone/locale/country) via free IP APIs.
 
-    Tries, in order: ipapi.co (https), ipwho.is (https), ip-api.com (http).
+    Probe order: ipinfo.io first (observed most reliable on Railway), then
+    ipwho.is, then ipapi.co (free tier is often 429 rate-limited).
     Never raises; falls back to GEO_FALLBACK when all probes fail.
     """
     global _last_geo
     for url in (
-        "https://ipapi.co/json/",
+        "https://ipinfo.io/json",
         "https://ipwho.is/",
-        "http://ip-api.com/json/?fields=status,message,country,countryCode,timezone",
+        "https://ipapi.co/json/",
     ):
         try:
             req = urllib.request.Request(
@@ -92,8 +93,8 @@ def detect_geo(timeout: float = 4.0) -> dict[str, str]:
                 country = data.get("country") or GEO_FALLBACK["country"]
             else:
                 timezone = data.get("timezone") or GEO_FALLBACK["timezone"]
-                cc = data.get("country_code") or "US"
-                country = data.get("country_name") or GEO_FALLBACK["country"]
+                cc = data.get("country_code") or data.get("country") or "US"
+                country = data.get("country_name") or data.get("country") or GEO_FALLBACK["country"]
             geo = {
                 "timezone": timezone,
                 "locale": _locale_for_country(cc),
@@ -252,7 +253,9 @@ def load_settings() -> Settings:
         codebuff_base_url=_api_base_url(),
         zeroclick_base_url=os.getenv("ZEROCLICK_BASE_URL", "https://zeroclick.dev"),
         session_id=os.getenv("FREEBUFF_SESSION_ID", str(uuid.uuid4())),
-        client_id=os.getenv("FREEBUFF_CLIENT_ID", uuid.uuid4().hex[:11]),
+        # 官方 SDK 要求 client_id = clientSessionId（会话级稳定标识）。
+        # 使用完整 UUID 而不是随机 11 位 hex，贴近官方格式，降低指纹风险。
+        client_id=os.getenv("FREEBUFF_CLIENT_ID", str(uuid.uuid4())),
         ad_providers=_csv("FREEBUFF_AD_PROVIDERS", "gravity,carbon"),
         request_timeout=float(os.getenv("FREEBUFF_TIMEOUT", "60")),
         debug=debug,
