@@ -87,6 +87,10 @@ class InMemoryLogHandler(logging.Handler):
             items = [item for item in items if item.level == selected_level]
         return [item.__dict__ for item in items[-limit:]]
 
+    def clear(self) -> None:
+        with self._lock:
+            self._records.clear()
+
 
 _memory_handler: InMemoryLogHandler | None = None
 
@@ -136,6 +140,11 @@ def get_buffered_logs(
     if _memory_handler is None:
         return []
     return _memory_handler.records(since_id=since_id, limit=limit, level=level)
+
+
+def clear_buffered_logs() -> None:
+    if _memory_handler is not None:
+        _memory_handler.clear()
 
 
 def render_debug(value: Any, limit: int) -> str:
