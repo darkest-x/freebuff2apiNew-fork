@@ -31,8 +31,32 @@ export interface ConfigPayload {
   proxy_display: string
   base_url: string
   port: number
+  timezone: string
+  locale: string
+  os_name: string
   accounts: AccountStatus[]
   rotation: RotationInfo | null
+}
+
+export interface GeoInfo {
+  timezone: string
+  locale: string
+  os_name: string
+  detected: {
+    timezone: string
+    locale: string
+  }
+}
+
+export interface GeoRefreshResult {
+  timezone: string
+  locale: string
+  detected: {
+    timezone: string
+    locale: string
+    country: string
+    countryCode: string
+  }
 }
 
 export interface TokenRow {
