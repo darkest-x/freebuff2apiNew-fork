@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { RefreshCw, Copy } from "lucide-react"
+import { RefreshCw, Copy, Trash2 } from "lucide-react"
 import { usePolling } from "@/hooks/use-polling"
 import { Skeleton } from "@/components/ui/skeleton"
 import { TableSkeleton } from "@/components/shared/PageSkeletons"
@@ -29,6 +29,7 @@ const levelColors: Record<string, string> = {
 export default function LogsPage() {
   const [level, setLevel] = useState<string>("")
   const [limit, setLimit] = useState(200)
+  const [clearing, setClearing] = useState(false)
   const fetcher = useCallback(
     () => api.logs({ level: level || undefined, limit }),
     [level, limit],
@@ -62,6 +63,16 @@ export default function LogsPage() {
       .map((l) => `${l.time} ${l.level} [${l.logger}] ${l.message}`)
       .join("\n")
     navigator.clipboard.writeText(text)
+  }
+
+  const clearAll = async () => {
+    setClearing(true)
+    try {
+      await api.clearLogs()
+      await refresh()
+    } finally {
+      setClearing(false)
+    }
   }
 
   return (
@@ -110,6 +121,10 @@ export default function LogsPage() {
           <Button size="sm" variant="outline" onClick={refresh} disabled={loading}>
             <RefreshCw className={`mr-1 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             刷新
+          </Button>
+          <Button size="sm" variant="destructive" onClick={clearAll} disabled={clearing}>
+            <Trash2 className="mr-1 h-4 w-4" />
+            清除
           </Button>
         </div>
       </div>
