@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { api } from "@/lib/api-client"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -12,9 +12,9 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { ShieldCheck, Info, Check, Globe, ToggleLeft, ToggleRight, Loader2, AlertTriangle } from "lucide-react"
+import { ShieldCheck, Info, Check, Globe, ToggleLeft, ToggleRight, Loader2, AlertTriangle, RefreshCw } from "lucide-react"
 import { usePolling } from "@/hooks/use-polling"
-import type { ConfigPayload } from "@/types"
+import type { ConfigPayload, GeoInfo } from "@/types"
 
 export default function SettingsPage() {
   const { data, refresh } = usePolling(() => api.config(), 30000)
@@ -22,6 +22,12 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false)
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Geo / device fingerprint state
+  const [geo, setGeo] = useState<GeoInfo | null>(null)
+  const [geoBusy, setGeoBusy] = useState(false)
+  const [geoSuccess, setGeoSuccess] = useState(false)
+  const [geoError, setGeoError] = useState<string | null>(null)
 
   // Proxy state
   const [proxyType, setProxyType] = useState("socks5")
@@ -37,6 +43,37 @@ export default function SettingsPage() {
   const [authOpen, setAuthOpen] = useState(false)
 
   const config: ConfigPayload | null = data
+
+  const loadGeo = useCallback(async () => {
+    try {
+      const g = await api.geo()
+      setGeo(g)
+      setGeoError(null)
+    } catch (err: unknown) {
+      setGeoError(err instanceof Error ? err.message : "获取时区信息失败")
+    }
+  }, [])
+
+  useEffect(() => {
+    loadGeo()
+  }, [loadGeo])
+
+  const handleRefreshGeo = useCallback(async () => {
+    setGeoBusy(true)
+    setGeoError(null)
+    setGeoSuccess(false)
+    try {
+      await api.refreshGeo()
+      await loadGeo()
+      setGeoSuccess(true)
+      refresh()
+      setTimeout(() => setGeoSuccess(false), 3000)
+    } catch (err: unknown) {
+      setGeoError(err instanceof Error ? err.message : "刷新失败")
+    } finally {
+      setGeoBusy(false)
+    }
+  }, [loadGeo, refresh])
 
   const handleUpdate = useCallback(async () => {
     if (!adminKey.trim() || adminKey.trim().length < 8) {
@@ -129,7 +166,7 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
-        <p className="text-sm text-muted-foreground">修改管理员密钥与代理配置</p>
+        <p className="text-sm text-muted-foreground">修改管理员密钥、设备指纹与代理配置</p>
       </div>
 
       {/* Admin Key */}
@@ -174,6 +211,67 @@ export default function SettingsPage() {
           )}
           {error && (
             <p className="text-sm text-destructive">{error}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Geo / Device Fingerprint */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Globe className="h-4 w-4" />
+            设备时区指纹
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <Alert>
+            <Info className="h-4 w-4" />
+            <AlertDescription>
+              广告请求会携带设备时区与语言。错误的时区（如亚洲时区）会被上游判定为受限访问层，导致 pro/luna 等 premium 模型被风控。服务启动时会自动检测一次；如果出口 IP 变了，可手动重新检测。
+            </AlertDescription>
+          </Alert>
+
+          <div className="grid gap-2 sm:grid-cols-3 text-sm">
+            <div>
+              <span className="text-muted-foreground">时区:</span>{" "}
+              <span className="font-mono">{geo?.timezone ?? config?.timezone ?? "..."}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">语言:</span>{" "}
+              <span className="font-mono">{geo?.locale ?? config?.locale ?? "..."}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">系统:</span>{" "}
+              <span className="font-mono">{geo?.os_name ?? config?.os_name ?? "windows"}</span>
+            </div>
+          </div>
+
+          {geo?.detected && (
+            <div className="text-xs text-muted-foreground">
+              最近检测结果: {geo.detected.timezone} / {geo.detected.locale}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <Button size="sm" onClick={handleRefreshGeo} disabled={geoBusy}>
+              {geoBusy ? (
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-1.5 h-4 w-4" />
+              )}
+              重新检测
+            </Button>
+          </div>
+
+          {geoSuccess && (
+            <div className="flex items-center gap-2 text-sm text-green-600">
+              <Check className="h-4 w-4" />时区已更新
+            </div>
+          )}
+          {geoError && (
+            <div className="flex items-center gap-2 text-sm text-destructive">
+              <AlertTriangle className="h-4 w-4" />{geoError}
+            </div>
           )}
         </CardContent>
       </Card>
