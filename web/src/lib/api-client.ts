@@ -101,6 +101,9 @@ export const api = {
     return request<LogsData>(`/logs${qs ? `?${qs}` : ""}`)
   },
 
+  clearLogs: () =>
+    request<unknown>("/logs", { method: "DELETE" }),
+
   // Network
   network: () => request<NetworkData>("/network"),
 
