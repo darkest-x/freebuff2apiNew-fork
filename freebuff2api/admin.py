@@ -25,7 +25,7 @@ from .config import (
     refresh_geo,
     write_env_values,
 )
-from .logging_config import get_buffered_logs
+from .logging_config import clear_buffered_logs, get_buffered_logs
 from .models import ALL_MODELS, DEFAULT_MODEL, get_model_registry, models_response
 from .usage import ApiKeyRecord
 from .usage_store import ApiKeyStore, RequestStore
@@ -277,8 +277,8 @@ def _region_from_payload(source: str, payload: dict[str, Any]) -> dict[str, Any]
 
 async def _probe_region(settings: Settings) -> dict[str, Any]:
     probes = [
-        ("ipapi.co", "https://ipapi.co/json/"),
         ("ipinfo.io", "https://ipinfo.io/json"),
+        ("ipapi.co", "https://ipapi.co/json/"),
         ("ip-api.com", "http://ip-api.com/json/?fields=status,message,query,country,regionName,city,timezone,isp,org"),
     ]
     errors: list[dict[str, Any]] = []
@@ -421,6 +421,14 @@ async def logs(
             "limit": limit,
         }
     )
+
+
+@router.delete("/admin/api/logs")
+async def clear_logs(request: Request) -> dict[str, Any]:
+    """Clear the in-memory buffered logs (admin UI 清除日志按钮)."""
+    _check_admin_auth(request)
+    clear_buffered_logs()
+    return _api_ok({}, "logs cleared")
 
 
 @router.get("/admin/api/network")
@@ -754,12 +762,12 @@ async def test_proxy(request: Request) -> dict[str, Any]:
         trust_env=False,
     ) as client:
         try:
-            r = await client.get("https://ipapi.co/json/")
+            r = await client.get("https://ipinfo.io/json")
             data = r.json()
             return _api_ok({
                 "ok": True,
                 "ip": data.get("ip"),
-                "country": data.get("country_name"),
+                "country": data.get("country"),
                 "city": data.get("city"),
                 "org": data.get("org"),
                 "latency_ms": round(r.elapsed.total_seconds() * 1000),
