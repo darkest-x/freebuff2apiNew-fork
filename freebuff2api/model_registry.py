@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -71,11 +73,17 @@ class DynamicModelTable:
 
 
 class ModelRegistry:
-    """In-memory dynamic model registry with 6h refresh and hardcoded fallback."""
+    """In-memory dynamic model registry.
+
+    - 模块导入时通过 ``start_background_refresh()`` 在后台线程同步抓取一次；
+    - 之后可由 admin 接口手动触发 ``refresh()``（异步）或 ``refresh_sync()``（线程）；
+    - 抓取失败时 models.py 的硬编码表兜底，不影响服务启动。
+    """
 
     def __init__(self) -> None:
         self._table: DynamicModelTable | None = None
         self._last_error: str | None = None
+        self._lock = threading.Lock()
 
     @property
     def table(self) -> DynamicModelTable | None:
@@ -104,6 +112,8 @@ class ModelRegistry:
             return True
         return time.time() - self._table.fetched_at > REFRESH_INTERVAL_SECONDS
 
+    # ── Async refresh (admin UI / FastAPI endpoints) ───────────────
+
     async def refresh(self) -> DynamicModelTable:
         try:
             async with httpx.AsyncClient(
@@ -111,40 +121,11 @@ class ModelRegistry:
                 follow_redirects=True,
                 trust_env=False,
             ) as client:
-                agents_src, models_src, model_ids_src = await self._fetch_sources(client)
-            if not agents_src or not models_src:
-                raise RuntimeError("dynamic model sources unavailable (agents or models missing)")
-
-            model_id_constants = _parse_model_id_constants(model_ids_src or "")
-            model_id_constants.update(_parse_model_id_constants(models_src))
-            mappings = _parse_agent_mappings(agents_src, model_id_constants)
-            root = mappings["root"]
-            if not root:
-                raise RuntimeError("FREEBUFF_ROOT_AGENT_ID_BY_MODEL is empty after parsing")
-
-            pools = _parse_model_pools(models_src, model_id_constants)
-            models = [
-                DynamicModelEntry(
-                    id=model_id,
-                    agent_id=root[model_id],
-                    base3_agent_id=mappings["base3_web"].get(model_id),
-                    reviewer_agent_id=mappings["reviewer"].get(model_id),
-                )
-                for model_id in root
-            ]
-            table = DynamicModelTable(
-                models=models,
-                premium_ids=pools["premium"],
-                glm_ids=pools["glm"],
-            )
-            self._table = table
-            self._last_error = None
-            logger.info(
-                "dynamic model registry refreshed models=%s premium=%s glm=%s",
-                len(table.models),
-                len(table.premium_ids),
-                len(table.glm_ids),
-            )
+                agents_src = await _fetch_first_async(client, SOURCES["agents"])
+                models_src = await _fetch_first_async(client, SOURCES["models"])
+                model_ids_src = await _fetch_first_async(client, SOURCES["model_ids"])
+            table = self._build_table(agents_src, models_src, model_ids_src)
+            self._apply_table(table)
             return table
         except Exception as error:
             self._last_error = str(error)
@@ -154,14 +135,79 @@ class ModelRegistry:
             )
             raise
 
-    async def _fetch_sources(self, client: httpx.AsyncClient) -> tuple[str | None, str | None, str | None]:
-        agents = await _fetch_first(client, SOURCES["agents"])
-        models = await _fetch_first(client, SOURCES["models"])
-        model_ids = await _fetch_first(client, SOURCES["model_ids"])
-        return agents, models, model_ids
+    # ── Sync refresh (background thread / startup) ─────────────────
+
+    def refresh_sync(self) -> DynamicModelTable:
+        agents_src = _fetch_first_sync(SOURCES["agents"])
+        models_src = _fetch_first_sync(SOURCES["models"])
+        model_ids_src = _fetch_first_sync(SOURCES["model_ids"])
+        table = self._build_table(agents_src, models_src, model_ids_src)
+        self._apply_table(table)
+        return table
+
+    def start_background_refresh(self) -> None:
+        def _run() -> None:
+            try:
+                self.refresh_sync()
+            except Exception as error:
+                logger.info(
+                    "background model registry refresh failed; hardcoded fallback active: %s",
+                    error,
+                )
+
+        threading.Thread(
+            target=_run,
+            name="model-registry-refresh",
+            daemon=True,
+        ).start()
+
+    # ── Shared table construction ──────────────────────────────────
+
+    def _build_table(
+        self,
+        agents_src: str | None,
+        models_src: str | None,
+        model_ids_src: str | None,
+    ) -> DynamicModelTable:
+        if not agents_src or not models_src:
+            raise RuntimeError("dynamic model sources unavailable (agents or models missing)")
+
+        model_id_constants = _parse_model_id_constants(model_ids_src or "")
+        model_id_constants.update(_parse_model_id_constants(models_src))
+        mappings = _parse_agent_mappings(agents_src, model_id_constants)
+        root = mappings["root"]
+        if not root:
+            raise RuntimeError("FREEBUFF_ROOT_AGENT_ID_BY_MODEL is empty after parsing")
+
+        pools = _parse_model_pools(models_src, model_id_constants)
+        models = [
+            DynamicModelEntry(
+                id=model_id,
+                agent_id=root[model_id],
+                base3_agent_id=mappings["base3_web"].get(model_id),
+                reviewer_agent_id=mappings["reviewer"].get(model_id),
+            )
+            for model_id in root
+        ]
+        return DynamicModelTable(
+            models=models,
+            premium_ids=pools["premium"],
+            glm_ids=pools["glm"],
+        )
+
+    def _apply_table(self, table: DynamicModelTable) -> None:
+        with self._lock:
+            self._table = table
+            self._last_error = None
+        logger.info(
+            "dynamic model registry refreshed models=%s premium=%s glm=%s",
+            len(table.models),
+            len(table.premium_ids),
+            len(table.glm_ids),
+        )
 
 
-async def _fetch_first(client: httpx.AsyncClient, urls: list[str]) -> str | None:
+async def _fetch_first_async(client: httpx.AsyncClient, urls: list[str]) -> str | None:
     for url in urls:
         try:
             response = await client.get(url)
@@ -169,6 +215,23 @@ async def _fetch_first(client: httpx.AsyncClient, urls: list[str]) -> str | None
                 return response.text
         except Exception as error:
             logger.debug("dynamic model source fetch failed url=%s error=%s", url, error)
+            continue
+    return None
+
+
+def _fetch_first_sync(urls: list[str]) -> str | None:
+    for url in urls:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"Accept": "text/plain", "User-Agent": "freebuff2api/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_SECONDS) as resp:
+                text = resp.read().decode("utf-8")
+            if text and len(text) > 100:
+                return text
+        except Exception as error:
+            logger.debug("dynamic model source sync fetch failed url=%s error=%s", url, error)
             continue
     return None
 
