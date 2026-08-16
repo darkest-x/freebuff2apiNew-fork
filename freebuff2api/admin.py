@@ -17,7 +17,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .codebuff import CodebuffAccountPool, CodebuffClient, CodebuffError
-from .config import DEFAULT_ADMIN_KEY, Settings, project_env_path, write_env_values
+from .config import (
+    DEFAULT_ADMIN_KEY,
+    Settings,
+    last_geo_info,
+    project_env_path,
+    refresh_geo,
+    write_env_values,
+)
 from .logging_config import get_buffered_logs
 from .models import ALL_MODELS, DEFAULT_MODEL, models_response
 from .usage import ApiKeyRecord
@@ -142,6 +149,9 @@ def _config_payload(settings: Settings, request: Request | None = None) -> dict[
         "proxy_has_auth": bool(settings.proxy_username),
         "base_url": settings.codebuff_api_url,
         "port": settings.port,
+        "timezone": settings.timezone,
+        "locale": settings.locale,
+        "os_name": settings.os_name,
     }
     if request is not None:
         payload["accounts"] = request.app.state.accounts.account_statuses()
@@ -311,7 +321,6 @@ async def _probe_url(client: httpx.AsyncClient, name: str, url: str) -> dict[str
         }
     except Exception as error:
         return {"name": name, "ok": False, "error": str(error)}
-    return response
 
 
 @router.post("/admin/api/logout")
@@ -434,6 +443,44 @@ async def network(request: Request) -> dict[str, Any]:
             "proxy_enabled": settings.proxy_enabled,
             "proxy_display": f"{settings.proxy_type}://{settings.proxy_host}:{settings.proxy_port}" if settings.proxy_host else "",
         }
+    )
+
+
+# ── Geo / 设备指纹 ─────────────────────────────────────────────────────
+
+
+@router.get("/admin/api/geo")
+async def geo_status(request: Request) -> dict[str, Any]:
+    """Current device fingerprint (timezone/locale) + last detection result."""
+    _check_admin_auth(request)
+    settings = _settings(request)
+    detected = last_geo_info()
+    return _api_ok(
+        {
+            "timezone": settings.timezone,
+            "locale": settings.locale,
+            "os_name": settings.os_name,
+            "detected": detected or {"timezone": settings.timezone, "locale": settings.locale},
+        }
+    )
+
+
+@router.post("/admin/api/geo/refresh")
+async def geo_refresh(request: Request) -> dict[str, Any]:
+    """Re-detect server IP geo and apply timezone/locale to the live settings."""
+    _check_admin_auth(request)
+    settings = _settings(request)
+    try:
+        geo = await asyncio.to_thread(refresh_geo, settings)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+    return _api_ok(
+        {
+            "timezone": settings.timezone,
+            "locale": settings.locale,
+            "detected": geo,
+        },
+        "geo refreshed",
     )
 
 
