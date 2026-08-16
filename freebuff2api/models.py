@@ -130,8 +130,10 @@ GEMINI_FREE_MODELS: tuple[FreebuffModel, ...] = (
 
 HARDCODED_MODELS = FREEBUFF_MODELS + GEMINI_FREE_MODELS
 
-# 运行时动态注册表（由 app lifespan 初始化）。
-_registry: ModelRegistry | None = None
+# 运行时动态注册表：模块导入即创建，并启动后台线程抓取一次官方模型映射。
+# 抓取完成前 resolve_model 回退硬编码表，不阻塞服务启动。
+_registry = ModelRegistry()
+_registry.start_background_refresh()
 
 
 def set_model_registry(registry: ModelRegistry | None) -> None:
@@ -139,7 +141,7 @@ def set_model_registry(registry: ModelRegistry | None) -> None:
     _registry = registry
 
 
-def get_model_registry() -> ModelRegistry | None:
+def get_model_registry() -> ModelRegistry:
     return _registry
 
 
