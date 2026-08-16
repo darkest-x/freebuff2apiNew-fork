@@ -23,6 +23,12 @@ COLORS = {
     logging.CRITICAL: "\033[35m",
 }
 
+# 明文日志开关（FREEBUFF_LOG_PLAINTEXT=true 时置为 True）。
+# 个人自用调试场景：把入站/出站请求头（含 Authorization）与请求/响应体
+# 完整写入日志（管理面板运行日志页 + stdout），替代抓包。
+# 默认 False：authorization/cookie 照常打码，body 照常截断。
+_plaintext = False
+
 
 @dataclass(frozen=True)
 class BufferedLogRecord:
@@ -95,7 +101,9 @@ class ColorFormatter(logging.Formatter):
 
 
 def configure_logging(settings: Settings) -> None:
-    global _memory_handler
+    global _memory_handler, _plaintext
+    _plaintext = bool(getattr(settings, "log_plaintext", False))
+
     handler = logging.StreamHandler(sys.stdout)
     formatter_cls = ColorFormatter if settings.log_color else logging.Formatter
     handler.setFormatter(formatter_cls(LOG_FORMAT, datefmt=DATE_FORMAT))
@@ -110,10 +118,11 @@ def configure_logging(settings: Settings) -> None:
 
     logging.getLogger("httpx").setLevel(logging.DEBUG if settings.debug else logging.WARNING)
     logging.getLogger("freebuff2api").debug(
-        "logging configured debug=%s level=%s body_chars=%s color=%s",
+        "logging configured debug=%s level=%s body_chars=%s plaintext=%s color=%s",
         settings.debug,
         settings.log_level,
         settings.log_body_chars,
+        _plaintext,
         settings.log_color,
     )
 
@@ -135,12 +144,18 @@ def render_debug(value: Any, limit: int) -> str:
     else:
         text = str(value)
 
+    # 明文模式：完整输出，不截断。
+    if _plaintext:
+        return text
     if limit <= 0 or len(text) <= limit:
         return text
     return f"{text[:limit]}...<truncated {len(text) - limit} chars>"
 
 
 def redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    # 明文模式：返回原始 headers（含 Authorization / Cookie）。
+    if _plaintext:
+        return dict(headers)
     redacted = {}
     for key, value in headers.items():
         if key.lower() in {"authorization", "cookie", "set-cookie"}:
