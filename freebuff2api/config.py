@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger("freebuff2api.config")
 
 HAR_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -18,6 +22,123 @@ HAR_BROWSER_USER_AGENT = (
 )
 
 DEFAULT_ADMIN_KEY = "sk-admin"
+
+# 默认兜底指纹必须是“干净的”：绝不回退到亚洲/中国时区。
+# 服务端会把设备时区/locale 用于地区访问层判定（limited access tier），
+# Asia/Shanghai + zh-CN 会被归入受限层，导致 pro/luna 等 premium 模型被拒。
+GEO_FALLBACK: dict[str, str] = {
+    "timezone": "America/Los_Angeles",
+    "locale": "en-US",
+    "country": "United States",
+    "countryCode": "US",
+}
+
+_last_geo: dict[str, str] = {}
+
+
+def _locale_for_country(country_code: str) -> str:
+    """Map an ISO country code to a plausible locale (never zh-CN by default)."""
+    code = (country_code or "").upper()
+    if code == "GB":
+        return "en-GB"
+    if code == "CA":
+        return "en-CA"
+    if code == "AU":
+        return "en-AU"
+    if code in {"DE", "AT", "CH"}:
+        return "de-DE"
+    if code == "FR":
+        return "fr-FR"
+    if code == "ES":
+        return "es-ES"
+    if code == "IT":
+        return "it-IT"
+    if code == "NL":
+        return "nl-NL"
+    if code == "JP":
+        return "ja-JP"
+    if code == "KR":
+        return "ko-KR"
+    return "en-US"
+
+
+def detect_geo(timeout: float = 4.0) -> dict[str, str]:
+    """Detect server public-IP geo (timezone/locale/country) via free IP APIs.
+
+    Tries, in order: ipapi.co (https), ipwho.is (https), ip-api.com (http).
+    Never raises; falls back to GEO_FALLBACK when all probes fail.
+    """
+    global _last_geo
+    for url in (
+        "https://ipapi.co/json/",
+        "https://ipwho.is/",
+        "http://ip-api.com/json/?fields=status,message,country,countryCode,timezone",
+    ):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "freebuff2api/1.0",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if url.startswith("http://ip-api.com"):
+                if data.get("status") != "success":
+                    continue
+                timezone = data.get("timezone") or GEO_FALLBACK["timezone"]
+                cc = data.get("countryCode") or "US"
+                country = data.get("country") or GEO_FALLBACK["country"]
+            else:
+                timezone = data.get("timezone") or GEO_FALLBACK["timezone"]
+                cc = data.get("country_code") or "US"
+                country = data.get("country_name") or GEO_FALLBACK["country"]
+            geo = {
+                "timezone": timezone,
+                "locale": _locale_for_country(cc),
+                "country": country,
+                "countryCode": cc,
+            }
+            _last_geo = dict(geo)
+            logger.info(
+                "geo detected url=%s timezone=%s locale=%s country=%s",
+                url,
+                geo["timezone"],
+                geo["locale"],
+                geo["country"],
+            )
+            return geo
+        except Exception as exc:
+            logger.debug("geo detect failed url=%s error=%s", url, exc)
+            continue
+    _last_geo = dict(GEO_FALLBACK)
+    logger.warning("geo detect failed for all sources; using fallback %s", GEO_FALLBACK)
+    return dict(GEO_FALLBACK)
+
+
+def last_geo_info() -> dict[str, str]:
+    """Return the last detection result (empty dict if never detected)."""
+    return dict(_last_geo) if _last_geo else {}
+
+
+def refresh_geo(settings: Settings) -> dict[str, str]:
+    """Re-detect geo and apply to a live Settings instance (admin UI refresh)."""
+    geo = detect_geo()
+    # Settings is frozen; object.__setattr__ is the intended escape hatch for
+    # runtime-updated admin fields (same pattern as proxy/token settings).
+    object.__setattr__(settings, "timezone", geo["timezone"])
+    object.__setattr__(settings, "locale", geo["locale"])
+    try:
+        write_env_values(
+            {
+                "FREEBUFF_TIMEZONE": geo["timezone"],
+                "FREEBUFF_LOCALE": geo["locale"],
+            }
+        )
+    except Exception as exc:
+        logger.warning("could not persist geo to .env: %s", exc)
+    return geo
 
 
 @dataclass(frozen=True)
@@ -44,8 +165,8 @@ class Settings:
     proxy_port: int = 1080
     proxy_username: str | None = None
     proxy_password: str | None = None
-    timezone: str = "Asia/Shanghai"
-    locale: str = "zh-CN"
+    timezone: str = "America/Los_Angeles"
+    locale: str = "en-US"
     os_name: str = "windows"
     system_prompt_override: str | None = None
     api_keys_json: str | None = None
@@ -110,6 +231,19 @@ def load_settings() -> Settings:
     debug = _bool("FREEBUFF_DEBUG", False)
     log_level = "DEBUG" if debug else os.getenv("FREEBUFF_LOG_LEVEL", "INFO")
     color_default = os.getenv("NO_COLOR") is None
+
+    # P0-A: 时区/地区指纹自动识别。
+    # Railway 等容器平台每次部署出口 IP 可能不同（欧/美西/美东），
+    # 启动时检测一次并写入内存；用户手动设置的环境变量永远优先。
+    timezone = os.getenv("FREEBUFF_TIMEZONE")
+    locale = os.getenv("FREEBUFF_LOCALE")
+    if not timezone or not locale:
+        geo = detect_geo()
+        if not timezone:
+            timezone = geo["timezone"]
+        if not locale:
+            locale = geo["locale"]
+
     return Settings(
         codebuff_token=os.getenv("FREEBUFF_TOKEN") or os.getenv("CODEBUFF_TOKEN"),
         local_api_key=os.getenv("FREEBUFF_API_KEY") or os.getenv("OPENAI_API_KEY"),
@@ -133,8 +267,8 @@ def load_settings() -> Settings:
         proxy_port=_int("FREEBUFF_PROXY_PORT", 1080),
         proxy_username=os.getenv("FREEBUFF_PROXY_USERNAME"),
         proxy_password=os.getenv("FREEBUFF_PROXY_PASSWORD"),
-        timezone=os.getenv("FREEBUFF_TIMEZONE", "Asia/Shanghai"),
-        locale=os.getenv("FREEBUFF_LOCALE", "zh-CN"),
+        timezone=timezone,
+        locale=locale,
         os_name=os.getenv("FREEBUFF_OS", "windows"),
         system_prompt_override=os.getenv("FREEBUFF_SYSTEM_PROMPT_OVERRIDE"),
         api_keys_json=os.getenv("FREEBUFF_API_KEYS"),
