@@ -26,7 +26,7 @@ from .config import (
     write_env_values,
 )
 from .logging_config import get_buffered_logs
-from .models import ALL_MODELS, DEFAULT_MODEL, models_response
+from .models import ALL_MODELS, DEFAULT_MODEL, get_model_registry, models_response
 from .usage import ApiKeyRecord
 from .usage_store import ApiKeyStore, RequestStore
 
@@ -354,6 +354,7 @@ async def overview(request: Request) -> dict[str, Any]:
         if accounts.rotation is not None
         else []
     )
+    registry = get_model_registry()
     return _api_ok(
         {
             "status": "ok",
@@ -364,6 +365,7 @@ async def overview(request: Request) -> dict[str, Any]:
             "debug": settings.debug,
             "log_level": settings.log_level,
             "model_availability": model_availability,
+            "model_registry": registry.status() if registry else {"loaded": False},
         }
     )
 
@@ -481,6 +483,50 @@ async def geo_refresh(request: Request) -> dict[str, Any]:
             "detected": geo,
         },
         "geo refreshed",
+    )
+
+
+# ── 动态模型注册表 ─────────────────────────────────────────────────────
+
+
+@router.get("/admin/api/model-registry")
+async def model_registry_status(request: Request) -> dict[str, Any]:
+    """Dynamic model registry status (official source mirror)."""
+    _check_admin_auth(request)
+    registry = get_model_registry()
+    return _api_ok(
+        registry.status() if registry else {"loaded": False},
+    )
+
+
+@router.post("/admin/api/model-registry/refresh")
+async def model_registry_refresh(request: Request) -> dict[str, Any]:
+    """Force a synchronous refresh of the dynamic model registry."""
+    _check_admin_auth(request)
+    registry = get_model_registry()
+    if registry is None:
+        raise HTTPException(status_code=503, detail="model registry not initialized")
+    try:
+        table = await asyncio.to_thread(registry.refresh_sync)
+    except Exception as error:
+        return _api_ok(
+            {
+                "ok": False,
+                "error": str(error),
+                "loaded": registry.table is not None,
+                "model_count": len(registry.table.models) if registry.table else 0,
+            },
+            "model registry refresh failed; hardcoded fallback active",
+        )
+    return _api_ok(
+        {
+            "ok": True,
+            "model_count": len(table.models),
+            "premium_count": len(table.premium_ids),
+            "glm_count": len(table.glm_ids),
+            "fetched_at": table.fetched_at,
+        },
+        "model registry refreshed",
     )
 
 
