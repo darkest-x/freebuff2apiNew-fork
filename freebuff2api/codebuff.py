@@ -41,11 +41,17 @@ logger = logging.getLogger("freebuff2api.codebuff")
 
 CODEBUFF_ACCEPT_ENCODING = "gzip, deflate"  # 官方 UA 虽带 br/zstd，但 Python httpx 默认无法解码 br/zstd，保持 gzip/deflate
 # 桌面版协议伪装（2026-08-10，对齐 pingmike2/freebuff2api-wokers 1.7.0 / issue #13）：
-# 旧版 CLI 指纹（Bun/1.3.11、Freebuff-CLI/0.0.105、旧 ai-sdk 版本号）已被上游
+# 旧版 CLI 指纹（Freebuff-CLI/0.0.105、旧 ai-sdk 版本号）已被上游
 # detectForeignFreebuffClient / foreign-client-signals.ts 标记，命中后强制降级到
 # 免费层模型（表现为空响应/429），并做账号级统计（终态封禁）。
-# - JSON 请求不再手动设置 User-Agent（httpx 默认），消除 CLI 运行时特征
-# - chat 请求使用官方 SDK 版本号签名（桌面版同款）
+#
+# [FP-2 确定] 2026-08-19 修正一个反效果决策：
+#   旧代码「JSON 请求不手动设置 User-Agent（httpx 默认）」，注释写着"消除 CLI 运行时特征"，
+#   实际效果完全相反 —— httpx 在没有显式 UA 时会自动补 `python-httpx/0.x.x`，
+#   于是 chat 伪装成 bun、session/agent-runs 自报 Python，同一个 token 两种身份，
+#   是一击必杀的指纹。抓包（会话 123 seq 19/20）实证官方 JSON 请求 UA 就是 `Bun/1.3.14`，
+#   与 chat 的 ai-sdk UA 是两个不同的值。
+CODEBUFF_JSON_USER_AGENT = "Bun/1.3.14"
 CHAT_COMPLETIONS_USER_AGENT = "ai-sdk/openai-compatible/0.0.0-test/codebuff ai-sdk/provider-utils/3.0.25 runtime/bun/1.3.14"
 
 # 广告/streak 链节流（对齐 worker.js runNormalClientBehavior：每账号 30 分钟一次）。
@@ -132,6 +138,7 @@ class CodebuffClient:
                         follow_redirects=True,
                         proxy=self.settings.upstream_proxy_url,
                         trust_env=False,
+                        verify=self.settings.ssl_cert_file or True,
                     )
         return self._client
 
@@ -147,25 +154,57 @@ class CodebuffClient:
         user_agent: str | None = None,
         require_auth: bool = True,
         extra: dict[str, str] | None = None,
+        header_style: str = "json",
     ) -> dict[str, str]:
+        """构造上游请求头，键名与顺序对齐官方桌面端。
+
+        [FP-1 确定] 2026-08-19：官方（bun / ai-sdk）发出的头**全小写**，且顺序固定。
+        抓包（Anything Analyzer 会话 123）实证两套顺序：
+
+        - `header_style="json"`（bun fetch 直接调，seq 19 POST /session）::
+
+              authorization, x-freebuff-instance-id, x-freebuff-model,
+              x-freebuff-multi-session, connection, user-agent, accept,
+              host, accept-encoding, content-length
+
+        - `header_style="chat"`（ai-sdk 构造，seq 150 POST /chat/completions）::
+
+              authorization, content-type, user-agent,
+              x-freebuff-acting-user-id, connection, accept, host,
+              accept-encoding, content-length
+
+        两套的共同规律：业务头（authorization / content-type / x-freebuff-*）在前，
+        bun 自动补的通用头在后；`x-freebuff-*` 之间是**字母序**（bun Headers 的排序行为）。
+        差异只在 user-agent 的位置：json 在 connection 之后，chat 在 content-type 之后。
+
+        改动前我们发的是 `Accept, Accept-Encoding, Connection, Host, Authorization,
+        x-freebuff-*` —— 顺序几乎完全相反，且大写驼峰与小写混排，是 HTTP/1.1 上
+        可直接观测的客户端指纹。
+        """
         if require_auth and not self.settings.codebuff_token:
             raise CodebuffError("FREEBUFF_TOKEN or CODEBUFF_TOKEN is required", 500)
 
-        headers = {
-            "Accept": "*/*",
-            "Accept-Encoding": CODEBUFF_ACCEPT_ENCODING,
-            "Connection": "keep-alive",
-            "Host": _host_header(self.settings.codebuff_api_url),
-        }
-        # 桌面版协议：默认不手动设置 User-Agent（httpx 默认），避免 CLI 运行时指纹
-        if user_agent:
-            headers["User-Agent"] = user_agent
+        # [FP-2 确定] 默认带官方 JSON UA（Bun/1.3.14）。绝不能留空 —— httpx 会自动
+        # 补 `python-httpx/x.y.z`，等于自报 Python 客户端。
+        resolved_ua = user_agent or CODEBUFF_JSON_USER_AGENT
+
+        headers: dict[str, str] = {}
         if require_auth:
-            headers["Authorization"] = f"Bearer {self.settings.codebuff_token}"
+            headers["authorization"] = f"Bearer {self.settings.codebuff_token}"
         if json_body:
-            headers["Content-Type"] = "application/json"
+            headers["content-type"] = "application/json"
+        if header_style == "chat":
+            headers["user-agent"] = resolved_ua
+        # 业务头按字母序插入，与 bun Headers 的排序行为一致。
         if extra:
-            headers.update(extra)
+            for key in sorted(extra):
+                headers[key.lower()] = extra[key]
+        headers["connection"] = "keep-alive"
+        if header_style != "chat":
+            headers["user-agent"] = resolved_ua
+        headers["accept"] = "*/*"
+        headers["host"] = _host_header(self.settings.codebuff_api_url)
+        headers["accept-encoding"] = CODEBUFF_ACCEPT_ENCODING
         return headers
 
     async def _json(
@@ -186,18 +225,38 @@ class CodebuffClient:
                 headers=request_headers,
             )
         except httpx.RequestError as error:
+            # [A5 确定] 网络层失败时也要留下请求现场。风控直接掐连接的表现就是
+            # RemoteProtocolError('Server disconnected without sending a response.')，
+            # 旧代码在这里直接 raise，日志里只剩一句异常，看不出我们发了什么头/体。
+            if self.settings.debug:
+                logger.debug(
+                    "[outbound] upstream json request FAILED method=%s url=%s headers=%s body=%s error=%r",
+                    method,
+                    url,
+                    redact_headers(request_headers),
+                    render_debug(body, self.settings.log_body_chars),
+                    error,
+                )
             raise _network_error(method, url, error) from error
         if self.settings.debug:
+            # [A5 确定] 记录 httpx **实际发出**的头（response.request.headers），
+            # 而不是我们构造的 dict。两者的差集正是 httpx 自动补的头
+            # （user-agent / content-length / accept-encoding 实际值），
+            # 也正是 python-httpx 指纹泄漏在旧日志里"看不见"的原因。
             logger.debug(
-                "[outbound] upstream json request method=%s url=%s headers=%s body=%s",
+                "[outbound] upstream json request method=%s url=%s actual_headers=%s body=%s",
                 method,
                 url,
-                redact_headers(request_headers),
+                redact_headers(dict(response.request.headers)),
                 render_debug(body, self.settings.log_body_chars),
             )
+            # [A5 确定] 响应头此前完全没有记录。其中 cf-ray（含机房代码）、
+            # server、x-render-origin-server、rndr-id、content-encoding、
+            # retry-after / x-ratelimit-* 是判断"是否被风控拦下"的直接线索。
             logger.debug(
-                "[outbound] upstream json response status=%s body=%s",
+                "[outbound] upstream json response status=%s headers=%s body=%s",
                 response.status_code,
+                redact_headers(dict(response.headers)),
                 render_debug(response.text, self.settings.log_body_chars),
             )
         if response.status_code >= 400:
@@ -207,6 +266,15 @@ class CodebuffClient:
         return response.json()
 
     async def validate_agents(self) -> None:
+        """校验 agent 定义（**当前无调用方，勿再启用**）。
+
+        [C7 确定] 抓包实证：`filter_requests(urlPattern="/api/agents")` → **空**，
+        官方桌面端**从不**请求 `/api/agents/validate`。而这个请求的 body 是
+        `agent_validation_payload()` —— 相当于主动把我们伪造的整份 agent 注册表
+        报给上游，是纯送分的暴露面；返回值在这里也只用于打日志，**没有任何功能作用**。
+        调用点已在 `app.py:473`/`app.py:1165`/`admin.py:899` 移除，方法体保留仅为
+        兼容旧引用。要恢复的话请先证明官方会发这个请求。
+        """
         if self._agents_validated:
             return
         async with self._validate_lock:
@@ -247,19 +315,38 @@ class CodebuffClient:
             headers=self._headers(require_auth=False),
         )
 
-    async def get_session(self, instance_id: str | None = None) -> dict[str, Any]:
-        # 对齐 Freebuff Desktop 0.0.62：GET session 带 multi-session + 额度快照头；
-        # 查询指定实例时额外带 instance-id。
-        headers_extra = {
-            "x-freebuff-include-unused-rate-limits": "1",
-            "x-freebuff-multi-session": "1",
-        }
+    async def get_session(
+        self,
+        instance_id: str | None = None,
+        *,
+        include_rate_limits: bool = False,
+    ) -> dict[str, Any]:
+        """查询当前 session 状态。
+
+        [FP-4 确定] 2026-08-19：`x-freebuff-include-unused-rate-limits` 改为**默认不带**。
+
+        抓包（会话 123）纠正了一处旧认知：响应是最小 body 还是完整 body，
+        由这个头决定，**不是** `status` 字段决定的。
+        - 官方心跳（seq 20）不带该头 → 响应只有 status/accessTier/instanceId/model/
+          admittedAt/expiresAt/remainingMs 七个字段
+        - 带该头才会返回 rateLimitsByModel / desktopSessionCounts / referral / glmPromo
+
+        旧代码无条件带该头，导致我们**每次 chat 前都拉一次完整额度快照**
+        （log.txt 实测 ≈每 11 秒一次）；官方客户端整个 session 生命周期只在
+        UI 需要刷新额度面板时做 1–2 次。高频轮询额度是典型的脚本特征。
+
+        另外 `POST /session` 的响应**本身就含** rateLimitsByModel + desktopSessionCounts
+        （seq 19 实证，且该 POST 请求并没带这个头），所以创建后根本不需要额外 GET 去拉。
+        """
+        extra = {"x-freebuff-multi-session": "1"}
+        if include_rate_limits:
+            extra["x-freebuff-include-unused-rate-limits"] = "1"
         if instance_id:
-            headers_extra["x-freebuff-instance-id"] = instance_id
+            extra["x-freebuff-instance-id"] = instance_id
         return await self._json(
             "GET",
             "/api/v1/freebuff/session",
-            headers=self._headers(extra=headers_extra),
+            headers=self._headers(extra=extra),
         )
 
     async def create_session(self, model: str) -> FreebuffSession:
@@ -563,61 +650,86 @@ class CodebuffClient:
         )
         return run_id
 
-    async def record_run_step(
+    # [FP-7/A7 确定] 已删除 `record_run_step()`（原来打 POST /api/v1/agent-runs/{run_id}/steps）。
+    # 抓包实证：`filter_requests(urlPattern="agent-runs/")` → **空**，官方从不调用带
+    # 路径参数的 agent-runs 子端点。step 信息是打包进 FINISH body 的 `steps` 数组
+    # 一次性提交的（见下方 finish_run）。该方法是老参考项目遗留的错误认知，
+    # 当前 finalize 被 skip 所以没触发，但一旦有人开启 finalize 就会打 404 —— 定时炸弹。
+    # AGENTS.md 第 7 步的描述同步修正。
+
+    async def finish_run(
         self,
         run_id: str,
         *,
-        step_number: int,
-        message_id: str | None,
-        start_time: str,
-        child_run_ids: list[str] | None = None,
+        total_steps: int,
+        steps: list[dict[str, Any]] | None = None,
+        status: str = "completed",
+        error_message: str | None = None,
     ) -> None:
-        await self._json(
-            "POST",
-            f"/api/v1/agent-runs/{run_id}/steps",
-            body={
-                "stepNumber": step_number,
-                "credits": 0,
-                "childRunIds": child_run_ids or [],
-                "messageId": message_id,
-                "status": "completed",
-                "startTime": start_time,
-            },
-        )
-        logger.info(
-            "agent run step recorded run_id=%s step=%s message_id=%s children=%s",
-            run_id,
-            step_number,
-            message_id,
-            child_run_ids or [],
-        )
+        """上报 run 结束。
 
-    async def finish_run(self, run_id: str, *, total_steps: int) -> None:
-        await self._json(
-            "POST",
-            "/api/v1/agent-runs",
-            body={
-                "action": "FINISH",
-                "runId": run_id,
-                "status": "completed",
-                "totalSteps": total_steps,
-                "directCredits": 0,
-                "totalCredits": 0,
-            },
+        [B3 待验证] body 格式已对齐官方抓包实录：
+        ```json
+        {"action":"FINISH","runId":"...","status":"completed","totalSteps":9,
+         "directCredits":0,"totalCredits":0,
+         "steps":[{"id":"...","stepNumber":1,"credits":0,"childRunIds":[],
+                   "messageId":"...","status":"completed","startTime":"..."}]}
+        ```
+        官方 12 个 run 的 totalSteps 分布：6,6,6,9,9,10,12,13,14,14,21,42；
+        失败时如实报 `status:"failed"` + `errorMessage`（含 JS 堆栈）。
+
+        **注意**：本方法当前**没有生产调用方**（`app.py::_finalize_run_with_client`
+        仍然 skip）。这里只把「万一启用时的 body 格式」改对，是否启用、以及反代
+        如何划定 run 边界（我们看不到「用户 turn」）尚未定论 ——
+        两种候选方案见 Docs/VERIFY-2026-08-19.md 第五节。
+        """
+        body: dict[str, Any] = {
+            # 键序照官方：action, runId, status, totalSteps, directCredits, totalCredits, steps
+            "action": "FINISH",
+            "runId": run_id,
+            "status": status,
+            "totalSteps": total_steps,
+            "directCredits": 0,
+            "totalCredits": 0,
+        }
+        if error_message:
+            body["errorMessage"] = error_message
+        # steps 为 None 时给空数组：官方 body 里这个键始终存在，
+        # 但我们绝不伪造 step 记录（假 UUID/假 startTime 本身就是指纹）。
+        body["steps"] = steps or []
+        await self._json("POST", "/api/v1/agent-runs", body=body)
+        logger.info(
+            "agent run finished run_id=%s status=%s total_steps=%s steps_reported=%s",
+            run_id,
+            status,
+            total_steps,
+            len(body["steps"]),
         )
-        logger.info("agent run finished run_id=%s total_steps=%s", run_id, total_steps)
 
     async def chat_events(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         url = f"{self.settings.codebuff_api_url}/api/v1/chat/completions"
         # 对齐 Freebuff Desktop 0.0.62：chat 请求头不再额外携带 x-freebuff-instance-id。
         # 官方桌面端只把 freebuff_instance_id 放进 codebuff_metadata body；
         # 旧版额外头是 1.7 时期的逆向结论，最新 orchestrator.js 中 chat headers 不含该头。
+        #
+        # [FP-1 确定] acting-user-id 走 extra 传入，才能落在官方位置
+        # （user-agent 之后、connection 之前）；旧代码构造完再追加，会掉到
+        # accept-encoding 后面，顺序错位。
+        # [C2 未验证] 该 UUID 的可靠来源尚未确认（session 响应里没有 userId 字段），
+        # 默认不发送；填错会导致 409，宁缺勿滥。详见 Docs/VERIFY-2026-08-19.md C2。
+        chat_extra: dict[str, str] = {}
+        if self.settings.acting_user_id:
+            chat_extra["x-freebuff-acting-user-id"] = self.settings.acting_user_id
         request_headers = self._headers(
             json_body=True,
             user_agent=CHAT_COMPLETIONS_USER_AGENT,
+            header_style="chat",
+            extra=chat_extra or None,
         )
-        if self.settings.acting_user_id:
-            request_headers["x-freebuff-acting-user-id"] = self.settings.acting_user_id
+        # [A5 确定] 流式响应的行数/字节数统计。旧实现只打印前 11 行且计数器自增
+        # 写在 if 内部（见下方注释），既拿不到完整响应也拿不到真实行数。
+        line_count = 0
+        total_bytes = 0
         try:
             async with (await self._ensure_client()).stream(
                 "POST",
@@ -626,10 +738,14 @@ class CodebuffClient:
                 headers=request_headers,
             ) as response:
                 if self.settings.debug:
+                    # [A5 确定] 同 _json：记录 httpx 实际发出的头。
+                    # 其中 content-length 就是本次上游请求体的真实字节数，
+                    # 是对比官方基线（step1 约 40–110 KB / step19 约 502 KB）的直接依据，
+                    # 不必再去数 JSON。
                     logger.debug(
-                        "[outbound] chat stream request url=%s headers=%s payload=%s",
+                        "[outbound] chat stream request url=%s actual_headers=%s payload=%s",
                         url,
-                        redact_headers(request_headers),
+                        redact_headers(dict(response.request.headers)),
                         render_debug(payload, self.settings.log_body_chars),
                     )
                     logger.debug(
@@ -656,32 +772,67 @@ class CodebuffClient:
                         "Codebuff chat returned empty stream",
                         502,
                     ) from None
-                line_count = 0
-                if self.settings.debug and (
-                    self.settings.log_stream_chunks or line_count <= 10
-                ):
+
+                def _trace_line(text: str) -> None:
+                    """行级统计 + 可选逐行日志。
+
+                    [A5 确定] 计数器必须在 if **之外**自增。旧代码把
+                    `line_count += 1` 写进 `if debug and (log_stream_chunks or
+                    line_count <= 10)` 内部，后果有两个：
+                      ① 关闭逐行日志时，计数一到 11 就不再满足 `<= 10`，
+                         于是第 11 行之后彻底不记 —— 日志里永远只有前 11 行；
+                      ② line_count 不等于真实行数，汇总统计无从谈起。
+                    现在无论是否 debug 都统计，日志详略只影响「打不打印每一行」。
+                    """
+                    nonlocal line_count, total_bytes
+                    size = len(text.encode("utf-8", errors="replace"))
                     line_count += 1
-                    logger.debug(
-                        "chat stream upstream line #%s bytes=%s data=%s",
-                        line_count,
-                        len(first_line.encode("utf-8", errors="replace")),
-                        render_debug(first_line, self.settings.log_body_chars),
-                    )
-                yield first_line
-                async for line in lines:
-                    if self.settings.debug and (
-                        self.settings.log_stream_chunks or line_count <= 10
-                    ):
-                        line_count += 1
+                    total_bytes += size
+                    if not self.settings.debug:
+                        return
+                    # 默认只逐行打印前 10 行（足够看到 role / 首个 delta /
+                    # 工具调用开头）；FREEBUFF_LOG_STREAM_CHUNKS=true 打印全部。
+                    if self.settings.log_stream_chunks or line_count <= 10:
                         logger.debug(
                             "chat stream upstream line #%s bytes=%s data=%s",
                             line_count,
-                            len(line.encode("utf-8", errors="replace")),
-                            render_debug(line, self.settings.log_body_chars),
+                            size,
+                            render_debug(text, self.settings.log_body_chars),
                         )
+
+                _trace_line(first_line)
+                yield first_line
+                async for line in lines:
+                    _trace_line(line)
                     yield line
         except httpx.RequestError as error:
+            # [A5 确定] 旧代码这里直接抛，日志里一片空白。
+            # log.txt 实录的「Server disconnected without sending a response」
+            # 走的正是这条分支 —— 风控在 TCP 层拒绝是本项目的核心症状，
+            # 却连「当时发了什么头、多大的体、断在第几行」都没留下现场。
+            if self.settings.debug:
+                logger.debug(
+                    "[outbound] chat stream FAILED url=%s headers=%s payload_chars=%s "
+                    "lines_before_failure=%s bytes_before_failure=%s error=%r",
+                    url,
+                    redact_headers(request_headers),
+                    len(json.dumps(payload, ensure_ascii=False, default=str)),
+                    line_count,
+                    total_bytes,
+                    error,
+                )
             raise _network_error("POST", url, error) from error
+        finally:
+            # [A5 确定] 无论正常结束、上游报错还是下游提前断开（生成器被关闭），
+            # 都留一条汇总：总行数 + 总字节数。用来判断「流是不是被截断了」——
+            # 比对 finish_reason 缺失 + 行数偏少即可定位。
+            if self.settings.debug:
+                logger.debug(
+                    "[outbound] chat stream closed url=%s lines=%s bytes=%s",
+                    url,
+                    line_count,
+                    total_bytes,
+                )
 
 
 class SessionManager:

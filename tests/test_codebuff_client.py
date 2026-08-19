@@ -207,7 +207,10 @@ class CodebuffClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("network error", str(ctx.exception))
         self.assertIn("ConnectError", str(ctx.exception))
 
-    async def test_json_explains_session_model_mismatch_as_region_limit(self) -> None:
+    async def test_json_surfaces_session_model_mismatch_upstream_message(self) -> None:
+        # 7202f54 起 session_model_mismatch 不再翻译成"账号或服务器出口"这类猜测性
+        # 中文提示，而是原样带上上游 message（更准确，也便于排查）。
+        # 本用例此前断言的旧文案已随该提交移除，这里同步到现行行为。
         def session_model_mismatch(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 409,
@@ -239,10 +242,11 @@ class CodebuffClientTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertIn("账号或服务器出口", str(ctx.exception))
+        self.assertIn("session_model_mismatch", str(ctx.exception))
         self.assertIn("DeepSeek V4 Flash", str(ctx.exception))
 
-    async def test_chat_stream_explains_session_model_mismatch_as_region_limit(self) -> None:
+    async def test_chat_stream_surfaces_session_model_mismatch_upstream_message(self) -> None:
+        # 同上：断言"原样带上游 message"，不再断言已删除的中文提示。
         def session_model_mismatch(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 409,
@@ -275,7 +279,7 @@ class CodebuffClientTests(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertIn("账号或服务器出口", str(ctx.exception))
+        self.assertIn("session_model_mismatch", str(ctx.exception))
         self.assertIn("DeepSeek V4 Flash", str(ctx.exception))
 
     async def test_chat_events_uses_har_fingerprint_headers(self) -> None:

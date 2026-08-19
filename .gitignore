@@ -23,6 +23,14 @@ freebuff2api-main-oran/
 # Data directory (runtime generated)
 data/
 
+# Runtime logs —— 绝不能入库
+# 开 FREEBUFF_LOG_PLAINTEXT=true 时日志**不脱敏**，会含明文
+# `authorization: Bearer <上游 token>` 和 admin key（已实测 log.txt 里就有）。
+# 一次 `git add -A` 就会把 token 推到远端，所以这里全部拦掉。
+log.txt
+*.log
+logs/
+
 # Node.js
 web/node_modules/
 web/dist/

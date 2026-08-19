@@ -562,8 +562,27 @@ async def _run_heartbeat_loop(
     instance_id: str,
     active: asyncio.Event,
 ) -> None:
-    """后台心跳：每 45 秒一次，直到 active 被 clear。"""
+    """后台心跳：立即一拍，随后每 45 秒一次，直到 active 被 clear。
+
+    [FP-3 确定] 2026-08-19：旧实现是 `await asyncio.sleep(45)` 在前，
+    而我们单次流式响应通常只有 10 余秒，于是心跳任务**每次都在睡眠中被取消**——
+    log.txt 全文心跳计数为 0，一次都没真正发出去。上游看到的是
+    「创建并持有 session + 高频 chat + 零心跳」，与任何真实客户端都不同。
+
+    官方行为（抓包会话 123 实证）：
+    - POST /session 成功后 **1.9 秒**就发第一拍（seq 19 → seq 20）
+    - 之后连续 `remainingMs` 差值 46689/45963/42595/47446/42264/45048/45019 ms，
+      即稳定 45 秒，且**贯穿整个 session 生命周期，包括 run 之间的空闲间隙**
+
+    遗留差距：本函数仍绑在流式响应期间，两次请求之间的空闲期没有心跳。
+    要完全对齐需把心跳挂到 SessionManager 的 session 生命周期上，
+    属下一轮改动（见 Docs/VERIFY-2026-08-19.md 的 A4 条目）。
+    """
+    if not instance_id:
+        return
     try:
+        # 立即一拍：对齐官方「建 session 后马上心跳」，也保证短流式请求至少发一次。
+        await client.heartbeat(instance_id)
         while active.is_set():
             await asyncio.sleep(45)
             if active.is_set():
@@ -928,6 +947,13 @@ async def _start_freebuff_run_chain(
     # 大幅降低首包前延迟，避免客户端在 run chain 阶段超时重试。
     agent_id = model.agent_id
     token = getattr(getattr(client, "settings", None), "codebuff_token", "") or ""
+    # [B1 待验证] 上报给 /api/v1/agent-runs 的 agentId 换成桌面端 thread agent id。
+    # 依据 & 回退方式见 config.py 的 desktop_agent_id 注释与
+    # Docs/VERIFY-2026-08-19.md B1。缓存键仍按 model.agent_id 区分，
+    # 避免不同模型共用同一个 run（额度桶按模型分，run 不能串）。
+    start_agent_id = (
+        getattr(getattr(client, "settings", None), "desktop_agent_id", "") or agent_id
+    )
     cache_key = f"{token}:{agent_id}"
     cached = _cached_run(cache_key)
     if cached is not None:
@@ -935,9 +961,11 @@ async def _start_freebuff_run_chain(
         return cached
 
     started_at = utc_now_iso()
-    run_id = await client.start_run(agent_id)
+    run_id = await client.start_run(start_agent_id)
     run = FreebuffRun(
         run_id=run_id,
+        # 缓存里记业务 agent_id（用于回填 codebuff_metadata / 日志定位），
+        # 不记上报值 —— 两者的用途不同，别混。
         agent_id=agent_id,
         started_at=started_at,
         child_run_id=None,
@@ -950,6 +978,12 @@ async def _start_child_chat_run_chain(
     client: CodebuffClient,
     model: FreebuffModel,
 ) -> FreebuffRun:
+    # [B1 待验证 · 已知遗留差异] 这条分支（Gemini file-picker / thinker-with-files）
+    # 故意**不套用** desktop_agent_id：它们是真正的 codebuff 子 agent，官方也是
+    # 用 ancestorRunIds 挂在父 run 下的。抓包那 12 次 START 之所以全是空
+    # ancestorRunIds，是那段会话没有生成子 agent，不能反推「官方从不用子 run」。
+    # 这里保持原样以免拖垮当前可用的 Gemini 通道；等真实数据能证明官方桌面端
+    # 子 agent 的 START 长什么样，再统一。
     assert model.parent_agent_id is not None
 
     token = getattr(getattr(client, "settings", None), "codebuff_token", "") or ""

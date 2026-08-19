@@ -214,6 +214,56 @@ def clamp_output_tokens(
     return payload
 
 
+# [B2 待验证] 上游 chat body 的顶层键序。
+# 前 5 个键是抓包直接确认的（会话 123 seq 150 官方桌面端 POST /api/v1/chat/completions）：
+#   model, stop, codebuff_metadata, provider, messages, ...
+# 其后的顺序未逐一核对，这里固定成一个稳定序列（宁可稳定也不要随机，见下方函数注释）。
+_OFFICIAL_PAYLOAD_KEY_ORDER: tuple[str, ...] = (
+    "model",
+    "stop",
+    "codebuff_metadata",
+    "provider",
+    "messages",
+    "stream",
+    "stream_options",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+)
+
+
+def order_upstream_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """按官方键序重排上游 chat body（openai / anthropic 两条入站路径共用）。
+
+    两个动机，第二个比第一个严重得多：
+
+    1. **顺序对齐**：官方 body 前 5 个键固定是
+       `model, stop, codebuff_metadata, provider, messages`；
+       我们改前是 `tools` 打头（log.txt L137 `payload={"tools": [...`）。
+    2. **消除随机键序**：旧代码用 `for key in _UPSTREAM_CHAT_KEYS` 拷贝客户端字段，
+       而 `_UPSTREAM_CHAT_KEYS` 是 **frozenset** —— CPython 默认开启字符串 hash
+       随机化（PYTHONHASHSEED=random），于是同一份请求**每次重启进程后键序都不同**。
+       真实客户端由固定代码路径序列化，键序是稳定的；键序随机漂移本身就是
+       "这不是官方客户端"的信号，而且会让任何基于 body 的指纹比对失去可复现性。
+
+    未列入 `_OFFICIAL_PAYLOAD_KEY_ORDER` 的键按字母序追加，保证任意输入都得到
+    确定顺序。纯序列化层改动，不增删任何字段，语义零影响。
+    """
+    ordered: dict[str, Any] = {}
+    for key in _OFFICIAL_PAYLOAD_KEY_ORDER:
+        if key in payload:
+            ordered[key] = payload[key]
+    for key in sorted(payload):
+        if key not in ordered:
+            ordered[key] = payload[key]
+    return ordered
+
+
 def build_upstream_payload(
     body: dict[str, Any],
     *,
@@ -285,7 +335,8 @@ def build_upstream_payload(
     if llm_step_number is not None:
         metadata["llm_step_number"] = llm_step_number
     payload["codebuff_metadata"] = metadata
-    return payload
+    # [B2 待验证] 最后统一重排键序（详见 order_upstream_payload 注释）。
+    return order_upstream_payload(payload)
 
 
 def raise_for_stream_error(chunk: dict[str, Any]) -> None:

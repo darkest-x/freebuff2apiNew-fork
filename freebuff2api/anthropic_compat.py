@@ -14,6 +14,7 @@ from .openai_compat import (
     clamp_output_tokens,
     inject_end_turn_signature,
     normalize_chat_messages,
+    order_upstream_payload,
     raise_for_stream_error,
 )
 
@@ -434,7 +435,9 @@ def build_anthropic_upstream_payload(
     if llm_step_number is not None:
         metadata["llm_step_number"] = llm_step_number
     payload["codebuff_metadata"] = metadata
-    return payload
+    # [B2 待验证] 与 /v1/chat/completions 路径共用同一套键序，
+    # 免得两条入站路径在上游看起来像两个不同客户端。
+    return order_upstream_payload(payload)
 
 
 # ── 2.2 Non-streaming accumulator ─────────────────────────────────────

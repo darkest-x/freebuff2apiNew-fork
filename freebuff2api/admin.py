@@ -651,7 +651,10 @@ async def verify_token(request: Request) -> dict[str, Any]:
     settings = replace(_settings(request), codebuff_token=token)
     client = CodebuffClient(settings)
     try:
-        data = await client.get_session()
+        # [FP-4 确定] 管理面板手动验证 token 是「用户点一次」的操作，语义等同官方
+        # 客户端刷新额度面板，因此这里显式要额度快照；自动化路径（chat 前的
+        # session 复用检查、账号健康探测）一律不带该头。详见 get_session 的说明。
+        data = await client.get_session(include_rate_limits=True)
         return _api_ok({"ok": True, "info": "Token verified", "upstream": data})
     except CodebuffError as error:
         return _api_ok({"ok": False, "info": str(error)})

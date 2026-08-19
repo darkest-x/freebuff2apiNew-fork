@@ -219,6 +219,7 @@ class Settings:
     proxy_port: int = 1080
     proxy_username: str | None = None
     proxy_password: str | None = None
+    ssl_cert_file: str | None = None
     timezone: str = "America/Los_Angeles"
     locale: str = "en-US"
     os_name: str = "windows"
@@ -234,6 +235,16 @@ class Settings:
     log_stream_chunks: bool = False  # 是否逐块记录流式 chunk（生产建议关闭）
     reasoning_in_content: bool = False  # 是否把 reasoning_content 以 <think> 标签折叠进 content
     acting_user_id: str = ""  # 可选：账号自己的 FreeBuff user id，作为 x-freebuff-acting-user-id 发送
+    # [B1 待验证] START 上报的 agentId。抓包 12 次 POST /api/v1/agent-runs 全部是
+    # {"action":"START","agentId":"freebuff-desktop-thread-local-v3","ancestorRunIds":[]}；
+    # 源码 orchestrator.txt:122236 getFreebuffDesktopThreadAgentId("local","base3")
+    # + :122575 threadAgentDefinition() 证明桌面端 thread agent 模板 id 与模型无关
+    # （模型走 x-freebuff-model 头 + codebuff_metadata）。
+    # 我们旧行为是逐模型的 base2-free-*（CLI/web 的画像），与桌面端 UA/prompt 拼盘。
+    # 置空字符串即回退到旧的 model.agent_id 行为，**不需要改代码**：
+    #   FREEBUFF_DESKTOP_AGENT_ID=            → 回退 base2-free-*
+    #   FREEBUFF_DESKTOP_AGENT_ID=xxx         → 强制指定
+    desktop_agent_id: str = "freebuff-desktop-thread-local-v3"
 
     @property
     def codebuff_api_url(self) -> str:
@@ -335,6 +346,7 @@ def load_settings() -> Settings:
         proxy_port=_int("FREEBUFF_PROXY_PORT", 1080),
         proxy_username=os.getenv("FREEBUFF_PROXY_USERNAME"),
         proxy_password=os.getenv("FREEBUFF_PROXY_PASSWORD"),
+        ssl_cert_file=os.getenv("FREEBUFF_SSL_CERT_FILE") or os.getenv("SSL_CERT_FILE"),
         timezone=timezone,
         locale=locale,
         os_name=os.getenv("FREEBUFF_OS", "windows"),
@@ -349,6 +361,10 @@ def load_settings() -> Settings:
         log_stream_chunks=_bool("FREEBUFF_LOG_STREAM_CHUNKS", False),
         reasoning_in_content=_bool("FREEBUFF_REASONING_IN_CONTENT", False),
         acting_user_id=os.getenv("FREEBUFF_ACTING_USER_ID", ""),
+        # [B1 待验证] 环境变量未设置时用桌面端 agentId；显式设为空串即回退旧行为。
+        desktop_agent_id=os.getenv(
+            "FREEBUFF_DESKTOP_AGENT_ID", "freebuff-desktop-thread-local-v3"
+        ).strip(),
     )
 
 

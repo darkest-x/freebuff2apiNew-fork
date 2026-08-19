@@ -46,6 +46,14 @@ class BufferedLogRecord:
     detail: str = ""
 
 
+# [FP-8 确定] 2026-08-19：`logging.Handler` 并没有 `formatException` 方法
+# （那是 `logging.Formatter` 的方法）。旧代码在 emit() 里直接调 self.formatException(...)，
+# 只要有任何一条带 exc_info 的日志就抛 AttributeError，被 handleError 吞掉 ——
+# 结果是「记录异常」这条路径本身坏了，真实的上游错误反而看不到。
+# log.txt 实录：AttributeError: 'InMemoryLogHandler' object has no attribute 'formatException'
+_EXC_FORMATTER = logging.Formatter()
+
+
 class InMemoryLogHandler(logging.Handler):
     def __init__(self, capacity: int) -> None:
         super().__init__()
@@ -58,7 +66,7 @@ class InMemoryLogHandler(logging.Handler):
         try:
             detail = ""
             if record.exc_info:
-                detail = self.formatException(record.exc_info)
+                detail = _EXC_FORMATTER.formatException(record.exc_info)
             item = BufferedLogRecord(
                 id=next(self._counter),
                 time=self.formatTime(record),
