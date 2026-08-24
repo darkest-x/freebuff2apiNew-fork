@@ -21,10 +21,12 @@ class OpenAICompatTests(unittest.TestCase):
     def test_models_response_lists_all_freebuff_models(self) -> None:
         response = models_response()
 
-        self.assertEqual(
-            [item["id"] for item in response["data"]],
-            [model.id for model in ALL_MODELS],
-        )
+        # 2026-08-24：断言从「等于硬编码 ALL_MODELS」改为「包含硬编码全部 id」。
+        # 原断言在动态注册表拉到上游新模型（luna-es / ox-alpha）后即红 ——
+        # 动态表新增模型是正常行为，不应让测试失败（陈旧断言修正）。
+        hardcoded_ids = {model.id for model in ALL_MODELS}
+        listed_ids = [item["id"] for item in response["data"]]
+        self.assertTrue(hardcoded_ids.issubset(set(listed_ids)))
         first = response["data"][0]
         self.assertGreaterEqual(first["context_window"], 1)
         self.assertGreaterEqual(first["max_input_tokens"], 1)

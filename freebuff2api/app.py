@@ -51,6 +51,7 @@ from .models import (
     resolve_model,
 )
 from .sse import decode_sse_data, encode_sse
+from .run_manager import ManagedRun, RunManager
 from .usage import RequestRecord
 from .usage_store import RequestStore, ApiKeyStore, create_stores
 
@@ -72,11 +73,49 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.sessions = accounts.default_sessions
     app.state.request_store = request_store
     app.state.api_key_store = api_key_store
+    # [FP-6] run 生命周期管理器：默认关闭（run_lifecycle_enabled=False 时全部
+    # 调用点走旧路径），开启后同对话复用 run + 如实 FINISH。见 run_manager.py。
+    run_manager = RunManager(
+        idle_ttl_seconds=settings.run_idle_ttl_seconds,
+        enabled=settings.run_lifecycle_enabled,
+    )
+    app.state.runs = run_manager
+    globals()["_run_manager"] = run_manager  # 请求上下文内经 contextvar 协作
     validation_task = asyncio.create_task(accounts.validate_accounts())
     logger.info("configured freebuff accounts count=%s api_keys=%s", accounts.account_count, api_key_store.total_count)
+    # 空闲清扫循环：每 5 分钟把超 TTL 的 run 后台 FINISH（官方 cacheExpiryMs 同周期）
+    sweep_stop = asyncio.Event()
+
+    async def _sweep_loop() -> None:
+        while not sweep_stop.is_set():
+            try:
+                await asyncio.wait_for(sweep_stop.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                pass
+            if sweep_stop.is_set():
+                break
+            try:
+                await run_manager.sweep_idle(accounts.clients_by_token_hash())
+            except Exception:
+                logger.exception("run idle sweep failed")
+
+    sweep_task: asyncio.Task[None] | None = None
+    if settings.run_lifecycle_enabled:
+        sweep_task = asyncio.create_task(_sweep_loop())
     try:
         yield
     finally:
+        if sweep_task is not None:
+            sweep_stop.set()
+            sweep_task.cancel()
+            # 进程退出兜底：限时 FINISH 全部活跃 run（不阻塞关停超过 8 秒）
+            try:
+                await asyncio.wait_for(
+                    run_manager.finish_all(accounts.clients_by_token_hash()),
+                    timeout=8.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("run finish_all on shutdown incomplete (best effort)")
         validation_task.cancel()
         await accounts.aclose()
 
@@ -463,6 +502,9 @@ async def chat_completions(request: Request) -> Any:
 
     messages = normalize_chat_messages(body.get("messages"))
     lease: CodebuffAccountLease | None = None
+    # [FP-6] 生命周期开启时把 messages 挂进 contextvar，
+    # _start_freebuff_run_chain 内部据此做对话指纹
+    _run_ctx_token = _run_ctx_messages.set(messages if settings.run_lifecycle_enabled else None)
     try:
         lease = await _accounts(request).acquire_session(
             model_config.session_id,
@@ -472,7 +514,7 @@ async def chat_completions(request: Request) -> Any:
         await client.request_ad_chain(messages=messages)
         # 不再调用 validate_agents()：/api/agents/validate 是旧 CLI 的额外管理请求，
         # Worker 1.7.0 桌面版协议不发送，去掉以缩小暴露面。
-        run = await _start_freebuff_run_chain(client, model_config)
+        run, managed_run = await _start_freebuff_run_chain_managed(client, model_config)
         trace_session_id = str(uuid.uuid4())
         payload = build_upstream_payload(
             {**body, "messages": messages},
@@ -512,10 +554,16 @@ async def chat_completions(request: Request) -> Any:
             await lease.aclose()
         logger.exception("failed to prepare chat completion")
         return _error_response(error)
+    finally:
+        # run 已建好（或失败已处理），恢复 contextvar；后续流式阶段用显式传参
+        _run_ctx_messages.reset(_run_ctx_token)
 
     if body.get("stream") is True:
         return StreamingResponse(
-            _stream_openai_chunks(request, payload, run, api_key=api_key, account_lease=lease),
+            _stream_openai_chunks(
+                request, payload, run, api_key=api_key, account_lease=lease,
+                managed_run=managed_run,
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
@@ -533,6 +581,7 @@ async def chat_completions(request: Request) -> Any:
             model,
             client=lease.client,
             account_lease=lease,
+            managed_run=managed_run,
         )
         duration_ms = int((time.time() - started) * 1000)
         usage = response.get("usage") or {}
@@ -599,6 +648,7 @@ async def _stream_openai_chunks(
     api_key = None,
     account_lease: CodebuffAccountLease | None = None,
     client: CodebuffClient | None = None,
+    managed_run: ManagedRun | None = None,
 ) -> AsyncIterator[bytes]:
     started = time.time()
     message_id: str | None = None
@@ -727,6 +777,9 @@ async def _stream_openai_chunks(
             error,
             exc_info=settings.debug,
         )
+        # [FP-6] 终态如实上报：chat 死于上游错误 → run 标 failed
+        if managed_run is not None:
+            _request_runs(request).note_failure(managed_run, str(error))
         stream_model = payload.get("model", "")
         notice = notice_for_error(error, stream_model)
         if notice is not None:
@@ -764,6 +817,9 @@ async def _stream_openai_chunks(
             "chat stream unexpected error run_id=%s",
             run.run_id,
         )
+        # [FP-6] 未预期异常同属失败终态
+        if managed_run is not None:
+            _request_runs(request).note_failure(managed_run, str(error))
         if api_key:
             duration_ms = int((time.time() - started) * 1000)
             _record_request(request, api_key, payload.get("model", ""), duration_ms, "error", error=str(error))
@@ -779,6 +835,17 @@ async def _stream_openai_chunks(
         )
         yield encode_sse("[DONE]")
         done_sent = True
+    except asyncio.CancelledError:
+        # 客户端断连/服务端取消：run 如实标 cancelled（freebuff-proxy 教训：
+        # zero cancelled runs looks synthetic），再原样抛出让 starlette 正常收尾
+        if managed_run is not None:
+            _request_runs(request).note_cancelled(managed_run)
+        raise
+    except GeneratorExit:
+        # 下游生成器被关闭（客户端停止接收）同属取消语义
+        if managed_run is not None:
+            _request_runs(request).note_cancelled(managed_run)
+        raise
     finally:
         heartbeat_active.clear()
         heartbeat_task.cancel()
@@ -810,6 +877,9 @@ async def _stream_openai_chunks(
         if api_key and not recorded:
             duration_ms = int((time.time() - started) * 1000)
             _record_request(request, api_key, payload.get("model", ""), duration_ms, "success")
+        # [FP-6] chat 成功：记一条 completed step（messageId 取上游 SSE chunk.id）
+        if managed_run is not None and chunk_yielded:
+            _request_runs(request).note_success(managed_run, message_id)
         _schedule_finalize_run(client, run, message_id)
         if account_lease is not None:
             await account_lease.aclose()
@@ -823,6 +893,7 @@ async def _collect_completion(
     *,
     client: CodebuffClient | None = None,
     account_lease: CodebuffAccountLease | None = None,
+    managed_run: ManagedRun | None = None,
 ) -> dict[str, Any]:
     message_id: str | None = None
     accumulator = CompletionAccumulator(model)
@@ -880,7 +951,19 @@ async def _collect_completion(
                 "chat completion response body=%s",
                 render_debug(response, _settings(request).log_body_chars),
             )
+        # [FP-6] 非流式成功：同样记一条 completed step
+        if managed_run is not None:
+            _request_runs(request).note_success(managed_run, message_id)
         return response
+    except asyncio.CancelledError:
+        # [FP-6] 客户端断连（非流式等待中被取消）→ cancelled 终态
+        if managed_run is not None:
+            _request_runs(request).note_cancelled(managed_run)
+        raise
+    except CodebuffError as error:
+        if managed_run is not None:
+            _request_runs(request).note_failure(managed_run, str(error))
+        raise
     finally:
         await _finalize_run(request, run, message_id, client=client)
 
@@ -933,6 +1016,103 @@ def _store_cached_run(key: str, run: FreebuffRun) -> None:
     _run_cache[key] = (time.monotonic(), run)
 
 
+# [FP-6] 生命周期开启时的调用上下文。RunManager 是 lifespan 创建的单例
+# （与既有 _run_cache 同为模块级全局风格）；messages 经 contextvar 在请求
+# 作用域内传递，供对话指纹使用 —— 不改 _start_freebuff_run_chain 的旧签名，
+# admin 探测等无请求上下文的调用自然回退旧缓存路径。
+from contextvars import ContextVar  # noqa: E402
+
+_run_manager: RunManager | None = None
+_run_ctx_messages: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "run_ctx_messages", default=None
+)
+
+
+def _request_runs(request: Request) -> RunManager:
+    """取 RunManager 单例。优先模块级（lifespan 设置），测试桩无 runs 属性时
+    兜底构造临时实例，保证 managed_run 非 None 的路径不会因缺 state 而崩。"""
+    if _run_manager is not None:
+        return _run_manager
+    try:
+        return request.app.state.runs
+    except AttributeError:
+        return RunManager()
+
+
+async def _acquire_managed_run_ctx(
+    client: CodebuffClient,
+    model: FreebuffModel,
+    messages: list[dict[str, Any]] | None,
+) -> tuple[FreebuffRun, ManagedRun]:
+    """_acquire_managed_run 的无 request 版本：供 _start_freebuff_run_chain
+    在请求上下文内（contextvar 已挂 messages）调用。"""
+    assert _run_manager is not None
+    manager = _run_manager
+    agent_id = model.agent_id
+    token = getattr(getattr(client, "settings", None), "codebuff_token", "") or ""
+    start_agent_id = (
+        getattr(getattr(client, "settings", None), "desktop_agent_id", "") or agent_id
+    )
+    managed, reused = await manager.acquire(
+        client,
+        token=token,
+        agent_id=start_agent_id,
+        messages=messages,
+    )
+    if reused:
+        logger.debug(
+            "reuse managed freebuff run run_id=%s agent_id=%s",
+            managed.run_id,
+            agent_id,
+        )
+    return (
+        FreebuffRun(
+            run_id=managed.run_id,
+            agent_id=agent_id,  # 业务 id 回填 metadata；上报值已由 manager 记录
+            started_at=utc_now_iso(),
+            child_run_id=None,
+        ),
+        managed,
+    )
+
+
+async def _acquire_managed_run(
+    request: Request,
+    client: CodebuffClient,
+    model: FreebuffModel,
+    messages: list[dict[str, Any]] | None,
+) -> tuple[FreebuffRun, ManagedRun]:
+    """生命周期开启路径：经 RunManager 取/建 run，并包装成旧 FreebuffRun
+    返回（payload 构造层不感知新结构）。"""
+    manager: RunManager = _run_manager or request.app.state.runs
+    agent_id = model.agent_id
+    token = getattr(getattr(client, "settings", None), "codebuff_token", "") or ""
+    start_agent_id = (
+        getattr(getattr(client, "settings", None), "desktop_agent_id", "") or agent_id
+    )
+    managed, reused = await manager.acquire(
+        client,
+        token=token,
+        agent_id=start_agent_id,
+        messages=messages,
+    )
+    if reused:
+        logger.debug(
+            "reuse managed freebuff run run_id=%s agent_id=%s",
+            managed.run_id,
+            agent_id,
+        )
+    return (
+        FreebuffRun(
+            run_id=managed.run_id,
+            agent_id=agent_id,  # 业务 id 回填 metadata；上报值已由 manager 记录
+            started_at=utc_now_iso(),
+            child_run_id=None,
+        ),
+        managed,
+    )
+
+
 async def _start_freebuff_run_chain(
     client: CodebuffClient,
     model: FreebuffModel | str,
@@ -954,6 +1134,17 @@ async def _start_freebuff_run_chain(
     start_agent_id = (
         getattr(getattr(client, "settings", None), "desktop_agent_id", "") or agent_id
     )
+    # [FP-6] 生命周期开启且有请求上下文（contextvar 挂了 messages）→ 走
+    # RunManager：同对话复用 run、终态如实 FINISH。无上下文（admin 探测等）
+    # 回退旧缓存路径。getattr 兜底：测试桩 client 可能没有 settings 属性。
+    if (
+        getattr(getattr(client, "settings", None), "run_lifecycle_enabled", False)
+        and _run_manager is not None
+        and _run_ctx_messages.get() is not None
+    ):
+        return (await _acquire_managed_run_ctx(client, model, _run_ctx_messages.get()))[
+            0
+        ]
     cache_key = f"{token}:{agent_id}"
     cached = _cached_run(cache_key)
     if cached is not None:
@@ -972,6 +1163,28 @@ async def _start_freebuff_run_chain(
     )
     _store_cached_run(cache_key, run)
     return run
+
+
+async def _start_freebuff_run_chain_managed(
+    client: CodebuffClient,
+    model: FreebuffModel | str,
+) -> tuple[FreebuffRun, ManagedRun | None]:
+    """[FP-6] 统一入口：生命周期开启 → (run, ManagedRun)；关闭 → (run, None)。
+
+    调用方把 managed_run 透传给流式/非流式收集函数，用于 step 记录与终态标记；
+    None 表示旧路径，所有 note_* 操作自动退化为 no-op。
+    """
+    if isinstance(model, str):
+        model = FreebuffModel(model, model)
+    # 子 agent 链路（Gemini file-picker 等）暂不纳管：官方对子 agent 用
+    # ancestorRunIds 挂父 run 下，边界方案未定前保持旧行为（VERIFY B1 注释）
+    if model.parent_agent_id or not (
+        getattr(getattr(client, "settings", None), "run_lifecycle_enabled", False)
+        and _run_manager is not None
+        and _run_ctx_messages.get() is not None
+    ):
+        return await _start_freebuff_run_chain(client, model), None
+    return await _acquire_managed_run_ctx(client, model, _run_ctx_messages.get())
 
 
 async def _start_child_chat_run_chain(
@@ -1156,6 +1369,12 @@ async def anthropic_messages(request: Request) -> Any:
 
     # Session & run preparation (shared with OpenAI path).
     lease: CodebuffAccountLease | None = None
+    # [FP-6] 同 OpenAI 路径：contextvar 挂 messages 供对话指纹
+    _run_ctx_token = _run_ctx_messages.set(
+        normalize_chat_messages(body.get("messages"))
+        if settings.run_lifecycle_enabled
+        else None
+    )
     try:
         lease = await _accounts(request).acquire_session(
             model_config.session_id,
@@ -1163,7 +1382,7 @@ async def anthropic_messages(request: Request) -> Any:
         client = lease.client
         await client.request_ad_chain()
         # 同 OpenAI 路径：不再调用 validate_agents()，缩小暴露面。
-        run = await _start_freebuff_run_chain(client, model_config)
+        run, managed_run = await _start_freebuff_run_chain_managed(client, model_config)
         trace_session_id = str(uuid.uuid4())
         payload = build_anthropic_upstream_payload(
             body,
@@ -1211,10 +1430,15 @@ async def anthropic_messages(request: Request) -> Any:
             status_code=500,
             content=anthropic_error_payload(str(error)),
         )
+    finally:
+        _run_ctx_messages.reset(_run_ctx_token)
 
     if stream:
         return StreamingResponse(
-            _stream_anthropic_events(request, payload, run, api_key=api_key, account_lease=lease, requested_model=requested_model),
+            _stream_anthropic_events(
+                request, payload, run, api_key=api_key, account_lease=lease,
+                requested_model=requested_model, managed_run=managed_run,
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
@@ -1232,6 +1456,7 @@ async def anthropic_messages(request: Request) -> Any:
             requested_model,
             client=lease.client,
             account_lease=lease,
+            managed_run=managed_run,
         )
         duration_ms = int((time.time() - started) * 1000)
         _record_request(request, api_key, model, duration_ms, "success",
@@ -1270,6 +1495,7 @@ async def _stream_anthropic_events(
     account_lease: CodebuffAccountLease | None = None,
     client: CodebuffClient | None = None,
     requested_model: str | None = None,
+    managed_run: ManagedRun | None = None,
 ) -> AsyncIterator[bytes]:
     started = time.time()
     client = client or (account_lease.client if account_lease else _client(request))
@@ -1314,6 +1540,18 @@ async def _stream_anthropic_events(
                         # Emit final events.
                         for sse_line in _emit_finalize():
                             yield sse_line
+                        # [FP-6] 正常收尾 → 记一条 completed step。
+                        # messageId 用 state.message_id（consume_chunk 首先记录的
+                        # 上游原始 chunk.id；仅当上游从未给过 id 时才是自造 msg_*，
+                        # 此时宁传 None 也不伪造 —— 见 note_success 的过滤）。
+                        if managed_run is not None:
+                            upstream_id = (
+                                state.message_id
+                                if state.message_id
+                                and not str(state.message_id).startswith("msg_")
+                                else None
+                            )
+                            _request_runs(request).note_success(managed_run, upstream_id)
                         break
 
                     for event_type, event_data in state.consume_chunk(data):
@@ -1364,6 +1602,9 @@ async def _stream_anthropic_events(
             error,
             exc_info=settings.debug,
         )
+        # [FP-6] 终态如实上报：chat 死于上游错误 → run 标 failed
+        if managed_run is not None:
+            _request_runs(request).note_failure(managed_run, str(error))
         stream_model = requested_model or payload.get("model", "")
         notice = notice_for_error(error, stream_model)
         if notice is not None:
@@ -1405,6 +1646,9 @@ async def _stream_anthropic_events(
             "anthropic stream unexpected error run_id=%s",
             run.run_id,
         )
+        # [FP-6] 未预期异常同属失败终态
+        if managed_run is not None:
+            _request_runs(request).note_failure(managed_run, str(error))
         if api_key:
             duration_ms = int((time.time() - started) * 1000)
             _record_request(request, api_key, requested_model or payload.get("model", ""), duration_ms, "error", error=str(error))
@@ -1413,6 +1657,16 @@ async def _stream_anthropic_events(
         yield anthropic_sse_encode("error", error_payload)
         for sse_line in _emit_finalize():
             yield sse_line
+    except asyncio.CancelledError:
+        # [FP-6] 客户端断连/取消 → cancelled 终态后原样抛出
+        if managed_run is not None:
+            _request_runs(request).note_cancelled(managed_run)
+        raise
+    except GeneratorExit:
+        # 下游生成器被关闭（客户端停止接收）同属取消语义
+        if managed_run is not None:
+            _request_runs(request).note_cancelled(managed_run)
+        raise
     finally:
         # 上游 EOF 但未发 [DONE]（免费通道长对话常见）→ 补 finalize（message_stop），
         # 否则 Anthropic 客户端悬挂/报 "terminated / other side closed"。
@@ -1437,6 +1691,7 @@ async def _collect_anthropic_message(
     *,
     client: CodebuffClient | None = None,
     account_lease: CodebuffAccountLease | None = None,
+    managed_run: ManagedRun | None = None,
 ) -> dict[str, Any]:
     accumulator = AnthropicCompletionAccumulator(model)
     client = client or _client(request)
@@ -1492,6 +1747,19 @@ async def _collect_anthropic_message(
                 "anthropic message response body=%s",
                 render_debug(response, _settings(request).log_body_chars),
             )
+        # [FP-6] 非流式成功：记 completed step（accumulator.id 是上游原始
+        # chunk.id；上游从未给过 id 时为 None，不伪造）
+        if managed_run is not None:
+            _request_runs(request).note_success(managed_run, accumulator.id)
         return response
+    except asyncio.CancelledError:
+        # [FP-6] 客户端断连 → cancelled 终态
+        if managed_run is not None:
+            _request_runs(request).note_cancelled(managed_run)
+        raise
+    except CodebuffError as error:
+        if managed_run is not None:
+            _request_runs(request).note_failure(managed_run, str(error))
+        raise
     finally:
         await _finalize_run(request, run, None, client=client)

@@ -1176,6 +1176,24 @@ class CodebuffAccountPool:
     def default_client(self) -> CodebuffClient:
         return self._accounts[0].client
 
+    def clients_by_token_hash(self) -> dict[str, CodebuffClient]:
+        """token 短哈希 → 该账号 client。
+
+        [FP-6] RunManager 清扫/兜底 FINISH 时按账号定位 client 用。
+        哈希函数与 run_manager.RunManager.token_key 保持一致（uuid5 NAMESPACE_URL
+        截 8 位 hex）。无 token 的默认账号映射到 "anon"。
+        """
+        mapping: dict[str, CodebuffClient] = {}
+        for account in self._accounts:
+            token = account.client.settings.codebuff_token or ""
+            key = (
+                f"{uuid.uuid5(uuid.NAMESPACE_URL, token).int >> 96:08x}"
+                if token
+                else "anon"
+            )
+            mapping[key] = account.client
+        return mapping
+
     @property
     def default_sessions(self) -> SessionManager:
         return self._accounts[0].sessions

@@ -245,6 +245,11 @@ class Settings:
     #   FREEBUFF_DESKTOP_AGENT_ID=            → 回退 base2-free-*
     #   FREEBUFF_DESKTOP_AGENT_ID=xxx         → 强制指定
     desktop_agent_id: str = "freebuff-desktop-thread-local-v3"
+    # [FP-6] run 生命周期开关与参数。默认关闭保持旧行为（START 后不 FINISH）；
+    # 开启后按官方桌面端画像工作：同对话复用 run、如实 FINISH
+    # completed/failed/cancelled、steps 打包提交。回滚即设 FREEBUFF_RUN_LIFECYCLE=false。
+    run_lifecycle_enabled: bool = False
+    run_idle_ttl_seconds: int = 1800  # 空闲多久 FINISH（对齐官方 cacheExpiryMs=1800000）
 
     @property
     def codebuff_api_url(self) -> str:
@@ -365,6 +370,9 @@ def load_settings() -> Settings:
         desktop_agent_id=os.getenv(
             "FREEBUFF_DESKTOP_AGENT_ID", "freebuff-desktop-thread-local-v3"
         ).strip(),
+        # [FP-6] run 生命周期（默认关，回滚开关）
+        run_lifecycle_enabled=_bool("FREEBUFF_RUN_LIFECYCLE", False),
+        run_idle_ttl_seconds=_int("FREEBUFF_RUN_IDLE_TTL", 1800),
     )
 
 
