@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import threading
@@ -34,7 +35,9 @@ SOURCES: dict[str, list[str]] = {
     ],
 }
 
-REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
+REFRESH_INTERVAL_SECONDS = int(
+    os.getenv("FREEBUFF_MODEL_REFRESH_SECONDS", str(2 * 60 * 60))
+)  # 默认 2h：上游挪模型/改配额（flash 入 premium 只提前了注释没发版）也能当天跟随
 FETCH_TIMEOUT_SECONDS = 10.0
 SNAPSHOT_PATH = Path(__file__).parent / "model_registry_snapshot.json"
 
@@ -159,25 +162,48 @@ class ModelRegistry:
         return table
 
     def start_background_refresh(self) -> None:
-        def _run() -> None:
-            try:
-                table = self.refresh_sync()
-                logger.info(
-                    "dynamic model registry refreshed models=%s fetched_at=%s",
-                    len(table.models),
-                    table.fetched_at,
-                )
-            except Exception as error:
-                logger.info(
-                    "background model registry refresh failed; hardcoded fallback active: %s",
-                    error,
-                )
+        """启动后台守护线程：立即抓取一次，之后每 REFRESH_INTERVAL_SECONDS 循环。
 
+        🔴 2026-08-24 修复：旧实现只抓一次就退出线程 —— "每 6h 刷新"从未真实
+        发生，flash 入 premium 这类上游变动只能靠重新部署感知。现改为常驻循环，
+        默认 2h 一拍（用户要求"最少两小时更新"），失败不中断（沿用上一张表）。
+        """
+        def _run() -> None:
+            while True:
+                try:
+                    table = self.refresh_sync()
+                    logger.info(
+                        "dynamic model registry refreshed models=%s premium=%s glm=%s fetched_at=%s",
+                        len(table.models),
+                        len(table.premium_ids),
+                        len(table.glm_ids),
+                        table.fetched_at,
+                    )
+                except Exception as error:
+                    # 失败保留当前表（快照/硬编码兜底），下一拍重试
+                    logger.info(
+                        "periodic model registry refresh failed; keeping current table: %s",
+                        error,
+                    )
+                # Event.wait 而非 sleep：进程退出时 daemon 线程随事件循环结束即可，
+                # 不需要额外的停止信号
+                stop_event.wait(REFRESH_INTERVAL_SECONDS)
+                if stop_event.is_set():
+                    return
+
+        stop_event = threading.Event()
+        self._refresh_stop = stop_event
         threading.Thread(
             target=_run,
             name="model-registry-refresh",
             daemon=True,
         ).start()
+
+    def stop_background_refresh(self) -> None:
+        """停止周期刷新循环（lifespan 关停时调用；daemon 线程本会随进程退出）。"""
+        event = getattr(self, "_refresh_stop", None)
+        if event is not None:
+            event.set()
 
     # ── Shared table construction ──────────────────────────────────
 

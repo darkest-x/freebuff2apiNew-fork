@@ -1,5 +1,5 @@
 {
-  "fetched_at": 1787155239.6237712,
+  "fetched_at": 1787619555.4622505,
   "models": [
     {
       "id": "mimo/mimo-v2.5",
@@ -44,6 +44,12 @@
       "reviewer_agent_id": null
     },
     {
+      "id": "openai/gpt-5.6-luna-es",
+      "agent_id": "base2-free-luna-es",
+      "base3_agent_id": "base3-free-luna-es",
+      "reviewer_agent_id": null
+    },
+    {
       "id": "anthropic/claude-fable-5",
       "agent_id": "base2-free-fable",
       "base3_agent_id": null,
@@ -54,14 +60,20 @@
       "agent_id": "base2-free-muse-spark",
       "base3_agent_id": "base3-free-muse-spark",
       "reviewer_agent_id": null
+    },
+    {
+      "id": "stealth/ox-alpha",
+      "agent_id": "base2-free-ox-alpha",
+      "base3_agent_id": "base3-free-ox-alpha",
+      "reviewer_agent_id": "code-reviewer-ox-alpha"
     }
   ],
   "premium_ids": [
     "crof/kimi-k3-eco",
     "deepseek/deepseek-v4-pro",
     "meta/muse-spark-1.2-contributor",
-    "minimax/minimax-m3",
-    "openai/gpt-5.6-luna"
+    "openai/gpt-5.6-luna",
+    "openai/gpt-5.6-luna-es"
   ],
   "glm_ids": [
     "z-ai/glm-5.2"

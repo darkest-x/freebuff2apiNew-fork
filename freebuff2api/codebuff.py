@@ -15,7 +15,7 @@ import httpx
 
 from .config import HAR_BROWSER_USER_AGENT, Settings, project_env_path
 from .logging_config import redact_headers, render_debug
-from .models import agent_validation_payload, is_premium_quota_exhausted, session_bucket_for_model
+from .models import agent_validation_payload, is_model_quota_exhausted, is_premium_quota_exhausted, session_bucket_for_model
 from .token_rotation import (
     STATUS_ACTIVE,
     STATUS_BLOCKED,
@@ -857,13 +857,27 @@ class SessionManager:
     def _bucket(model: str) -> str:
         return session_bucket_for_model(model)
 
-    def _raise_if_premium_quota_exhausted(self, data: dict[str, Any]) -> None:
+    def _raise_if_premium_quota_exhausted(self, data: dict[str, Any], model: str = "") -> None:
+        """配额闸门（2026-08-24 重构）：按目标模型精确判定。
+
+        上游各 premium 模型的 limit 不同（共享 premium 池 + per-model caps：
+        V4 Pro cap=1、Luna cap=2、flash 无独立 cap 只吃共享池），旧逻辑把
+        "所有 premium 模型都耗尽"才报错，会让 Luna 单独耗尽时仍反复撞上游
+        429。现改为：目标模型自己的配额耗尽即报错；model 为空时退回旧的
+        全池判定。
+        """
         rate_limits = data.get("rateLimitsByModel") if isinstance(data, dict) else None
-        if not is_premium_quota_exhausted(rate_limits):
-            return
+        if model:
+            if not is_model_quota_exhausted(rate_limits, model):
+                return
+            reason = f"{model} daily session quota exhausted"
+        else:
+            if not is_premium_quota_exhausted(rate_limits):
+                return
+            reason = "Freebuff premium daily quota exhausted"
         self.premium_quota_exhausted_until = next_beijing_1500_epoch()
         raise CodebuffError(
-            "Freebuff premium daily quota exhausted. Resets at 15:00 Asia/Shanghai.",
+            f"{reason}. Resets at 15:00 Asia/Shanghai.",
             403,
         )
 
@@ -906,7 +920,7 @@ class SessionManager:
                     model,
                 }:
                     if self._bucket(model) == "premium":
-                        self._raise_if_premium_quota_exhausted(data)
+                        self._raise_if_premium_quota_exhausted(data, model=model)
                     cached.remaining_ms = data.get("remainingMs")
                     logger.debug(
                         "reuse freebuff session model=%s instance_id=%s remaining_ms=%s",
@@ -1027,7 +1041,7 @@ class SessionManager:
             return None
 
         if self._bucket(requested_model) == "premium":
-            self._raise_if_premium_quota_exhausted(data)
+            self._raise_if_premium_quota_exhausted(data, model=requested_model)
 
         current_model = data.get("model")
         instance_id = data.get("instanceId")

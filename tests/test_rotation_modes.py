@@ -21,13 +21,14 @@ class RotationModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_balanced_unlimited_fans_out_across_accounts(self) -> None:
         pool = CodebuffAccountPool(_settings(mode="balanced"))
 
-        first = pool._next_available_index("deepseek/deepseek-v4-flash")
-        await pool._reserve_account("deepseek/deepseek-v4-flash")
-        second = pool._next_available_index("deepseek/deepseek-v4-flash")
+        # mimo 恒为 unlimited 池（flash 2026-08-18 起已入 premium）。
+        first = pool._next_available_index("mimo/mimo-v2.5")
+        await pool._reserve_account("mimo/mimo-v2.5")
+        second = pool._next_available_index("mimo/mimo-v2.5")
 
         self.assertEqual(first, 0)
         self.assertEqual(second, 1)
-        await pool.release(0, "deepseek/deepseek-v4-flash")
+        await pool.release(0, "mimo/mimo-v2.5")
         await pool.aclose()
 
     async def test_balanced_premium_uses_only_one_account_at_a_time(self) -> None:
@@ -200,14 +201,15 @@ class RotationModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_conservative_unlimited_uses_only_first_account(self) -> None:
         pool = CodebuffAccountPool(_settings(mode="conservative"))
 
-        first = pool._next_available_index("deepseek/deepseek-v4-flash")
+        # mimo 恒为 unlimited 池（flash 2026-08-18 起已入 premium）。
+        first = pool._next_available_index("mimo/mimo-v2.5")
         self.assertEqual(first, 0)
 
-        await pool._reserve_account("deepseek/deepseek-v4-flash")
+        await pool._reserve_account("mimo/mimo-v2.5")
         # 免费模型通道被占用后，不允许使用第二个账号
-        self.assertIsNone(pool._next_available_index("deepseek/deepseek-v4-flash"))
-        await pool.release(0, "deepseek/deepseek-v4-flash")
-        self.assertEqual(pool._next_available_index("deepseek/deepseek-v4-flash"), 0)
+        self.assertIsNone(pool._next_available_index("mimo/mimo-v2.5"))
+        await pool.release(0, "mimo/mimo-v2.5")
+        self.assertEqual(pool._next_available_index("mimo/mimo-v2.5"), 0)
         await pool.aclose()
 
 

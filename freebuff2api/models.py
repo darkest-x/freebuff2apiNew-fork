@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .model_registry import DynamicModelEntry, ModelRegistry
 
@@ -113,18 +115,61 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
 
 DEFAULT_MODEL = FREEBUFF_MODELS[0]
 
-# 官方 desktop session bucket：unlimited 只有 flash / mimo（Web 标准池也是这两个）。
-# 其余 freebuff 模型全部占 premium bucket（premium:1）。
+# 官方 desktop session bucket 的**硬编码兜底**（仅动态注册表不可用时生效）。
+#
+# 🔴 2026-08-24 更正：flash 已于 2026-08-18 被官方移入 premium 池
+# （上游 freebuff-models.ts：DEEPSEEK_V4_FLASH_MODEL.premium = true，
+# 注释原文 "Unlimited is MiMo 2.5 while this holds"）。旧表把 flash 当
+# unlimited 是过期认知 —— 正确性现在由 model_registry 动态维护，
+# 这里只保留"注册表从未成功加载过"时的最后兜底。
 UNLIMITED_SESSION_MODEL_IDS = frozenset(
     {
-        "deepseek/deepseek-v4-flash",
         "mimo/mimo-v2.5",
     }
 )
 
+# GLM 5.2：referral 解锁、独立周/日池，绝不落入共享 premium 日额度
+GLM_POOL_MODEL_IDS = frozenset({"z-ai/glm-5.2"})
+
+
+def _dynamic_premium_ids() -> frozenset[str] | None:
+    """从动态模型注册表读取当前 premium 池（上游 freebuff-models.ts 的
+    FREEBUFF_PREMIUM_MODEL_IDS）。注册表未加载时返回 None（调用方走兜底）。"""
+    registry = get_model_registry()
+    if registry is None or registry.table is None:
+        return None
+    return frozenset(registry.table.premium_ids)
+
+
+def session_bucket_for_model(model: str) -> str:
+    """返回官方 desktop session bucket：``premium`` 或 ``unlimited``。
+
+    判定优先级（2026-08-24 起）：
+    1. 动态注册表的 premium_ids —— 上游把模型在池间挪动（如 flash 入 premium）
+       时 2 小时内自动跟随，无需改代码部署；
+    2. 硬编码 UNLIMITED_SESSION_MODEL_IDS 兜底（注册表不可用时）。
+
+    GLM 池在并发桶语义上仍占 premium 桶（官方 DESKTOP_PREMIUM_BUCKET 是
+    PREMIUM ∪ GLM），但额度上独立 —— 由 is_model_quota_exhausted 单独处理。
+    """
+    if not model:
+        return "premium"
+    dynamic = _dynamic_premium_ids()
+    if dynamic is not None:
+        # 不在动态 premium 集合 → unlimited（官方 STANDARD 表由 !premium 过滤派生）
+        return "premium" if model in dynamic else "unlimited"
+    if model in UNLIMITED_SESSION_MODEL_IDS:
+        return "unlimited"
+    return "premium"
+
 
 def is_premium_quota_exhausted(rate_limits_by_model: dict[str, Any]) -> bool:
-    """检测上游返回的 rateLimitsByModel 是否所有 premium 模型额度都已耗尽。"""
+    """检测上游 rateLimitsByModel 是否 premium 池已耗尽（全池判定，保留兼容）。
+
+    ⚠️ 官方各 premium 模型的 limit 并不相同（shared pool + per-model caps），
+    新代码应使用 :func:`is_model_quota_exhausted` 做按目标模型的精确判定；
+    本函数保留给"整池是否全干涸"的粗粒度场景（SessionManager 全局闸门）。
+    """
     if not isinstance(rate_limits_by_model, dict):
         return False
     premium_items = [
@@ -140,11 +185,65 @@ def is_premium_quota_exhausted(rate_limits_by_model: dict[str, Any]) -> bool:
     )
 
 
-def session_bucket_for_model(model: str) -> str:
-    """返回官方 desktop session bucket：``premium`` 或 ``unlimited``。"""
-    if model in UNLIMITED_SESSION_MODEL_IDS:
-        return "unlimited"
-    return "premium"
+def model_quota_state(
+    rate_limits_by_model: dict[str, Any], model: str
+) -> tuple[bool, int]:
+    """查询单个模型在最近一次 session 响应里的配额状态。
+
+    返回 (exhausted, remaining)。规则对齐 freebuff-proxy quota.go：
+    - limit <= 0 或无该模型条目 → 配额未知，不算耗尽（不误杀）
+    - recentCount >= limit 且 resetAt 在未来 → 耗尽；resetAt 缺失/已过
+      视为窗口已滚动，不判耗尽（等下次 admission 给出新鲜计数）
+    """
+    if not isinstance(rate_limits_by_model, dict):
+        return False, 0
+    entry = rate_limits_by_model.get(model)
+    if not isinstance(entry, dict):
+        return False, 0
+    try:
+        limit = float(entry.get("limit") or 0)
+        recent = float(entry.get("recentCount") or 0)
+    except (TypeError, ValueError):
+        return False, 0
+    if limit <= 0:
+        return False, 0
+    reset_future = _reset_at_in_future(entry.get("resetAt"))
+    if reset_future and recent >= limit:
+        return True, 0
+    if recent < limit:
+        return False, max(0, int(limit - recent))
+    return False, 0
+
+
+def is_model_quota_exhausted(rate_limits_by_model: dict[str, Any], model: str) -> bool:
+    """按目标模型精确判断额度是否耗尽（各 premium 模型配额不同的正确姿势）。"""
+    exhausted, _ = model_quota_state(rate_limits_by_model, model)
+    return exhausted
+
+
+def _reset_at_in_future(reset_at: Any) -> bool:
+    """解析上游 quota 的 resetAt（RFC3339 / unix 秒 / unix 毫秒，对齐官方 CLI
+    parseFlexTime 三种形态），判断是否仍在未来。解析失败视为不在未来。"""
+    if reset_at is None or reset_at == "":
+        return False
+    # 数字形态：unix 秒或毫秒
+    try:
+        value = float(reset_at)
+        if value > 1e12:  # 毫秒时间戳
+            value /= 1000.0
+        return value > time.time()
+    except (TypeError, ValueError):
+        pass
+    # 字符串形态：ISO8601 / RFC3339
+    text = str(reset_at).strip()
+    try:
+        normalized = text.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp() > time.time()
+    except ValueError:
+        return False
 
 
 CONTEXT_PRUNER_AGENT_ID = "context-pruner"
