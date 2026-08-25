@@ -69,6 +69,10 @@ class DynamicModelTable:
     models: list[DynamicModelEntry]
     premium_ids: set[str] = field(default_factory=set)
     glm_ids: set[str] = field(default_factory=set)
+    # 🔴 蜜罐/god-only 模型（FREEBUFF_WEB_GOD_ONLY_MODELS）：上游隐藏的评测路由，
+    # 真实客户端不可达；第三方流量打过去形同"探测隐藏路由"（#201 luna-es 实证，
+    # kimi-k3-eco 为文档级蜜罐）。必须过滤出服务列表且拒绝 resolve。
+    god_only_ids: set[str] = field(default_factory=set)
     fetched_at: float = field(default_factory=time.time)
 
     def find(self, model_id: str) -> DynamicModelEntry | None:
@@ -173,10 +177,11 @@ class ModelRegistry:
                 try:
                     table = self.refresh_sync()
                     logger.info(
-                        "dynamic model registry refreshed models=%s premium=%s glm=%s fetched_at=%s",
+                        "dynamic model registry refreshed models=%s premium=%s glm=%s god_only=%s fetched_at=%s",
                         len(table.models),
                         len(table.premium_ids),
                         len(table.glm_ids),
+                        len(table.god_only_ids),
                         table.fetched_at,
                     )
                 except Exception as error:
@@ -237,6 +242,7 @@ class ModelRegistry:
             models=models,
             premium_ids=pools["premium"],
             glm_ids=pools["glm"],
+            god_only_ids=pools["god_only"],
         )
 
     def _table_to_dict(self, table: DynamicModelTable) -> dict[str, Any]:
@@ -253,6 +259,7 @@ class ModelRegistry:
             ],
             "premium_ids": sorted(table.premium_ids),
             "glm_ids": sorted(table.glm_ids),
+            "god_only_ids": sorted(table.god_only_ids),
         }
 
     def _table_from_dict(self, data: dict[str, Any]) -> DynamicModelTable:
@@ -268,6 +275,7 @@ class ModelRegistry:
             ],
             premium_ids=set(data.get("premium_ids", [])),
             glm_ids=set(data.get("glm_ids", [])),
+            god_only_ids=set(data.get("god_only_ids", [])),
             fetched_at=float(data.get("fetched_at") or time.time()),
         )
 
@@ -299,10 +307,11 @@ class ModelRegistry:
             self._last_error = None
         self._save_snapshot(table)
         logger.info(
-            "dynamic model registry refreshed models=%s premium=%s glm=%s",
+            "dynamic model registry refreshed models=%s premium=%s glm=%s god_only=%s",
             len(table.models),
             len(table.premium_ids),
             len(table.glm_ids),
+            len(table.god_only_ids),
         )
 
 
@@ -380,7 +389,7 @@ def _parse_model_pools(
     Simplistic but sufficient: expand array literals with spread (``...FOO``) using
     previously parsed const-array definitions.
     """
-    pools: dict[str, set[str]] = {"premium": set(), "glm": set()}
+    pools: dict[str, set[str]] = {"premium": set(), "glm": set(), "god_only": set()}
 
     const_arrays: dict[str, list[str]] = {}
     array_re = re.compile(r"export\s+const\s+([A-Z0-9_]+)\s*=\s*\[([^\]]*)\]")
@@ -403,6 +412,8 @@ def _parse_model_pools(
     pool_names = {
         "premium": ("FREEBUFF_PREMIUM_MODEL_IDS", "FREEBUFF_WEB_PREMIUM_MODEL_IDS"),
         "glm": ("FREEBUFF_GLM_V52_MODEL_IDS",),
+        # god-only：官方隐藏评测路由（kimi-k3-eco / luna-es 等），见 DynamicModelTable 注释
+        "god_only": ("FREEBUFF_WEB_GOD_ONLY_MODELS",),
     }
     for pool_kind, names in pool_names.items():
         for pool_name in names:

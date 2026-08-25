@@ -14,11 +14,15 @@ from unittest.mock import patch
 
 from freebuff2api.model_registry import DynamicModelEntry, DynamicModelTable, ModelRegistry
 from freebuff2api.models import (
+    GOD_ONLY_MODEL_IDS,
     GLM_POOL_MODEL_IDS,
     UNLIMITED_SESSION_MODEL_IDS,
+    all_models,
+    is_god_only_model,
     is_model_quota_exhausted,
     is_premium_quota_exhausted,
     model_quota_state,
+    resolve_model,
     session_bucket_for_model,
     set_model_registry,
 )
@@ -147,6 +151,60 @@ class PerModelQuotaTests(unittest.TestCase):
         partial = {"openai/gpt-5.6-luna": _quota(2, 2), "deepseek/deepseek-v4-pro": _quota(1, 0)}
         with patch("freebuff2api.models.session_bucket_for_model", return_value="premium"):
             self.assertFalse(is_premium_quota_exhausted(partial))
+
+
+class GodOnlyHoneypotTests(unittest.TestCase):
+    """god-only（蜜罐）模型过滤：/v1/models 不广播、resolve 直接拒绝。
+
+    依据 freebuff-proxy #201/#140：luna-es 等被上游移入
+    FREEBUFF_WEB_GOD_ONLY_MODELS（隐藏评测路由），kimi-k3-eco 为文档级蜜罐；
+    第三方流量打过去形同"探测隐藏路由"，是封禁级暴露面。
+    """
+
+    def setUp(self) -> None:
+        set_model_registry(None)  # 走硬编码兜底
+
+    def tearDown(self) -> None:
+        set_model_registry(None)
+
+    def test_kimi_k3_eco_in_fallback_god_only(self) -> None:
+        self.assertIn("crof/kimi-k3-eco", GOD_ONLY_MODEL_IDS)
+        self.assertTrue(is_god_only_model("crof/kimi-k3-eco"))
+
+    def test_core_models_not_honeypot(self) -> None:
+        for model in (
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-5.6-luna",
+        ):
+            self.assertFalse(is_god_only_model(model))
+
+    def test_resolve_rejects_honeypot(self) -> None:
+        with self.assertRaises(ValueError):
+            resolve_model("crof/kimi-k3-eco")
+
+    def test_models_list_does_not_broadcast_honeypot(self) -> None:
+        ids = {m.id for m in all_models()}
+        self.assertNotIn("crof/kimi-k3-eco", ids)
+        # 三条主力线必须仍在服务列表里
+        for required in (
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "openai/gpt-5.6-luna",
+        ):
+            self.assertIn(required, ids)
+
+    def test_dynamic_table_can_flag_new_honeypot(self) -> None:
+        # 上游哪天把别的模型挪进 god-only（如 luna-es）→ 动态表自动跟随过滤
+        registry = _registry_with({"deepseek/deepseek-v4-pro"})
+        registry._table.god_only_ids = {"openai/gpt-5.6-luna-es"}
+        registry._table.models.append(
+            DynamicModelEntry(id="openai/gpt-5.6-luna-es", agent_id="a")
+        )
+        set_model_registry(registry)
+        self.assertTrue(is_god_only_model("openai/gpt-5.6-luna-es"))
+        with self.assertRaises(ValueError):
+            resolve_model("openai/gpt-5.6-luna-es")
 
 
 class RefreshIntervalTests(unittest.TestCase):

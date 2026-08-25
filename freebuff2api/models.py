@@ -131,6 +131,30 @@ UNLIMITED_SESSION_MODEL_IDS = frozenset(
 # GLM 5.2：referral 解锁、独立周/日池，绝不落入共享 premium 日额度
 GLM_POOL_MODEL_IDS = frozenset({"z-ai/glm-5.2"})
 
+# 🔴 蜜罐/god-only 模型（官方 FREEBUFF_WEB_GOD_ONLY_MODELS 兜底）：上游隐藏评测
+# 路由，真实客户端不可达；第三方流量打过去形同"探测隐藏路由"，是封禁级暴露面
+# （freebuff-proxy #201 luna-es 实证 + AGENTS.md kimi-k3-eco 记载）。动态注册表
+# 优先，此处仅兜底。
+GOD_ONLY_MODEL_IDS = frozenset({"crof/kimi-k3-eco"})
+
+
+def _dynamic_god_only_ids() -> frozenset[str] | None:
+    """从动态模型注册表读取当前 god-only 集合；注册表未加载时返回 None（调用方走兜底）。"""
+    registry = get_model_registry()
+    if registry is None or registry.table is None:
+        return None
+    return frozenset(registry.table.god_only_ids)
+
+
+def is_god_only_model(model: str) -> bool:
+    """该模型是否为上游隐藏评测路由（蜜罐）。动态表优先，硬编码兜底。"""
+    if not model:
+        return False
+    dynamic = _dynamic_god_only_ids()
+    if dynamic is not None:
+        return model in dynamic
+    return model in GOD_ONLY_MODEL_IDS
+
 
 def _dynamic_premium_ids() -> frozenset[str] | None:
     """从动态模型注册表读取当前 premium 池（上游 freebuff-models.ts 的
@@ -393,20 +417,32 @@ def _hardcoded_by_id(model_id: str) -> FreebuffModel | None:
 
 
 def all_models() -> list[FreebuffModel]:
-    """Merged model list: hardcoded first, then dynamic entries not already present."""
-    models = list(HARDCODED_MODELS)
+    """Merged model list: hardcoded first, then dynamic entries not already present.
+
+    god-only（蜜罐）模型绝不广播到 /v1/models —— 上游隐藏评测路由，第三方
+    请求它形同自曝（见 GOD_ONLY_MODEL_IDS 注释）。
+    """
+    models = [m for m in HARDCODED_MODELS if not is_god_only_model(m.id)]
     seen = {model.id for model in models}
     if _registry is not None and _registry.table is not None:
         for entry in _registry.table.models:
-            if entry.id not in seen:
-                models.append(_model_from_dynamic(entry))
-                seen.add(entry.id)
+            if entry.id in seen or is_god_only_model(entry.id):
+                continue
+            models.append(_model_from_dynamic(entry))
+            seen.add(entry.id)
     return models
 
 
 def resolve_model(requested: str | None) -> FreebuffModel:
     if not requested:
         return DEFAULT_MODEL
+
+    # 🔴 蜜罐模型直接拒绝：不打上游、不进 session 链路，本地 fail-fast。
+    if is_god_only_model(requested):
+        raise ValueError(
+            f"Model '{requested}' is a hidden upstream evaluation route "
+            f"(god-only) and cannot be served"
+        )
 
     # Dynamic registry first (auto-updated every 6h from official sources).
     if _registry is not None:

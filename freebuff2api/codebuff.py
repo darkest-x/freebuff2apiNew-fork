@@ -15,7 +15,13 @@ import httpx
 
 from .config import HAR_BROWSER_USER_AGENT, Settings, project_env_path
 from .logging_config import redact_headers, render_debug
-from .models import agent_validation_payload, is_model_quota_exhausted, is_premium_quota_exhausted, session_bucket_for_model
+from .models import (
+    GLM_POOL_MODEL_IDS,
+    agent_validation_payload,
+    is_model_quota_exhausted,
+    is_premium_quota_exhausted,
+    session_bucket_for_model,
+)
 from .token_rotation import (
     STATUS_ACTIVE,
     STATUS_BLOCKED,
@@ -34,6 +40,7 @@ from .token_rotation import (
     is_spend_limited,
     next_beijing_1500_epoch,
     parse_429_info,
+    parse_ban_resumes_at,
 )
 
 
@@ -128,6 +135,9 @@ class CodebuffClient:
         self._client_lock = asyncio.Lock()
         self._agents_validated = False
         self._validate_lock = asyncio.Lock()
+        # 最近一次 admission 快照（POST /session 响应自带 rateLimitsByModel，
+        # seq 19 实证）。供 GLM 无权益预检等本地闸门使用，避免额外 GET 拉取。
+        self.last_rate_limits: dict[str, Any] | None = None
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -319,28 +329,23 @@ class CodebuffClient:
         self,
         instance_id: str | None = None,
         *,
-        include_rate_limits: bool = False,
+        include_rate_limits: bool = False,  # 已废弃：任何路径都不再发送（见下）
     ) -> dict[str, Any]:
         """查询当前 session 状态。
 
-        [FP-4 确定] 2026-08-19：`x-freebuff-include-unused-rate-limits` 改为**默认不带**。
+        🔴 2026-08-25 全面禁发 `x-freebuff-include-unused-rate-limits`
+        （freebuff-proxy #140 源码级实证）：官方 vendored CLI 定义了该常量但
+        **从不发送**；只有 Web/Desktop 与第三方代理发，且上游把它当指证第三方
+        代理的证据（netroindonesia 案例）。保留形参仅为兼容旧调用方，发了也会
+        被忽略。
 
-        抓包（会话 123）纠正了一处旧认知：响应是最小 body 还是完整 body，
-        由这个头决定，**不是** `status` 字段决定的。
-        - 官方心跳（seq 20）不带该头 → 响应只有 status/accessTier/instanceId/model/
-          admittedAt/expiresAt/remainingMs 七个字段
-        - 带该头才会返回 rateLimitsByModel / desktopSessionCounts / referral / glmPromo
-
-        旧代码无条件带该头，导致我们**每次 chat 前都拉一次完整额度快照**
-        （log.txt 实测 ≈每 11 秒一次）；官方客户端整个 session 生命周期只在
-        UI 需要刷新额度面板时做 1–2 次。高频轮询额度是典型的脚本特征。
-
-        另外 `POST /session` 的响应**本身就含** rateLimitsByModel + desktopSessionCounts
-        （seq 19 实证，且该 POST 请求并没带这个头），所以创建后根本不需要额外 GET 去拉。
+        抓包（会话 123）：响应是最小 body 还是完整 body，由这个头决定。
+        - 官方心跳（seq 20）不带该头 → 响应只有 status/accessTier/instanceId/
+          model/admittedAt/expiresAt/remainingMs 七个字段
+        - 额度快照从 POST /session 的 admission 响应取（seq 19 实证自带
+          rateLimitsByModel + desktopSessionCounts），无需额外 GET 拉取。
         """
         extra = {"x-freebuff-multi-session": "1"}
-        if include_rate_limits:
-            extra["x-freebuff-include-unused-rate-limits"] = "1"
         if instance_id:
             extra["x-freebuff-instance-id"] = instance_id
         return await self._json(
@@ -387,6 +392,11 @@ class CodebuffClient:
                 "/api/v1/freebuff/session",
                 headers=headers,
             )
+        # 缓存 admission 快照：POST /session 响应自带 rateLimitsByModel
+        # （seq 19 实证），是首次请求唯一可靠的额度快照来源。
+        rate_limits = data.get("rateLimitsByModel") if isinstance(data, dict) else None
+        if isinstance(rate_limits, dict):
+            self.last_rate_limits = rate_limits
         if data.get("status") == "queued":
             return await self._wait_for_active_session(data, model)
         return self._session_from_data(data, model)
@@ -911,6 +921,22 @@ class SessionManager:
         model: str,
         messages: list[dict[str, Any]] | None = None,
     ) -> FreebuffSession:
+        # 🔴 GLM 无权益预检（freebuff-proxy #183 源码级实证）：无 referral 权益的
+        # 账号请求 base2-free-glm 时，上游不做 429 配额判定而是直接 403
+        # account_banned（一次接触即封号，实测 4 个 token 碰 GLM 的全灭）。
+        # 用最近一次 admission 快照（POST /session 响应自带 rateLimitsByModel）
+        # 本地判断：无快照或快照里没有 glm 条目 = 无法证明有权益 → fail-fast
+        # 绝不触碰上游。首次请求（尚无任何快照）同样拒绝：宁可误拒也不赌封号。
+        if model in GLM_POOL_MODEL_IDS:
+            snapshot = getattr(self.client, "last_rate_limits", None)
+            if not isinstance(snapshot, dict) or "z-ai/glm-5.2" not in snapshot:
+                raise CodebuffError(
+                    "z-ai/glm-5.2 requires referral entitlement which this "
+                    "account does not have (or has never been verified). "
+                    "Requesting it upstream would trigger an immediate account "
+                    "ban, so the request was rejected locally. Please switch models.",
+                    403,
+                )
         cached = self._sessions.get(model)
         if cached and cached.is_fresh:
             try:
@@ -1042,6 +1068,11 @@ class SessionManager:
 
         if self._bucket(requested_model) == "premium":
             self._raise_if_premium_quota_exhausted(data, model=requested_model)
+
+        # 缓存 admission 快照（若本次响应带额度数据），供 GLM 预检等本地闸门使用
+        rate_limits = data.get("rateLimitsByModel")
+        if isinstance(rate_limits, dict):
+            self.client.last_rate_limits = rate_limits
 
         current_model = data.get("model")
         instance_id = data.get("instanceId")
@@ -1576,13 +1607,30 @@ class CodebuffAccountPool:
 
         if is_account_banned(message):
             self._rotation.mark_invalid(index)
+            # 🔴 临时封禁带 resumes_at（官方源码实证：RFC3339/unix s/ms 三形态），
+            # 有值 = 到点自动解封，按精确时间冷却该账号；无值（0.0）= 硬封禁
+            # （user.banned 布尔位），维持旧行为：停到下个北京时间 15:00。
+            resumes_at = parse_ban_resumes_at(message)
             self._invalid_reasons[index] = "banned"
-            self._premium_banned_until = next_beijing_1500_epoch()
-            logger.warning(
-                "account %s banned; marked invalid and disabled all models until next 15:00 Asia/Shanghai message=%s",
-                index + 1,
-                message[:300],
-            )
+            if resumes_at > 0:
+                retry_ms = int((resumes_at - time.time()) * 1000) + 1_000
+                self._rotation.block(index, retry_ms, "")
+                self._premium_banned_until = resumes_at
+                logger.warning(
+                    "account %s temporarily banned until %s (resumes_at); "
+                    "cooled precisely message=%s",
+                    index + 1,
+                    datetime.fromtimestamp(resumes_at, tz=timezone.utc).isoformat(),
+                    message[:300],
+                )
+            else:
+                self._premium_banned_until = next_beijing_1500_epoch()
+                logger.warning(
+                    "account %s hard banned (no resumes_at); marked invalid and "
+                    "disabled all models until next 15:00 Asia/Shanghai message=%s",
+                    index + 1,
+                    message[:300],
+                )
             return
 
         if is_country_blocked(message):
@@ -1921,6 +1969,17 @@ def _upstream_error(
     if status == "free_mode_capacity_deferred" or data.get("error") == "free_mode_capacity_deferred":
         return CodebuffError(
             f"{prefix}: 429 {text}",
+            429,
+        )
+
+    # 🔴 free_mode_run_fanout（freebuff-proxy PR #207）：上游把「同一 run_id
+    # 扇出到多个 client_id」「启动期 prewarm 全 agent 风暴」视为代理特征并以此
+    # 拒绝（ban 级证据收集信号）。body 形如 {"error":"free_mode_run_fanout",
+    # "message":"Free mode request rejected."}。必须按限流处理（退避冷却），
+    # 绝不能落进未知 502 路径被重试放大 —— 重试等于继续提交"代理特征"。
+    if data.get("error") == "free_mode_run_fanout" or "free_mode_run_fanout" in text:
+        return CodebuffError(
+            f"{prefix}: 429 free_mode_run_fanout - {text}",
             429,
         )
 

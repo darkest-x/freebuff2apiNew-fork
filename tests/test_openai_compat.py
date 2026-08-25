@@ -24,7 +24,12 @@ class OpenAICompatTests(unittest.TestCase):
         # 2026-08-24：断言从「等于硬编码 ALL_MODELS」改为「包含硬编码全部 id」。
         # 原断言在动态注册表拉到上游新模型（luna-es / ox-alpha）后即红 ——
         # 动态表新增模型是正常行为，不应让测试失败（陈旧断言修正）。
-        hardcoded_ids = {model.id for model in ALL_MODELS}
+        # 2026-08-25：蜜罐模型（kimi-k3-eco 等）不再广播，需从"全部 id"中排除。
+        from freebuff2api.models import is_god_only_model
+
+        hardcoded_ids = {
+            model.id for model in ALL_MODELS if not is_god_only_model(model.id)
+        }
         listed_ids = [item["id"] for item in response["data"]]
         self.assertTrue(hardcoded_ids.issubset(set(listed_ids)))
         first = response["data"][0]
@@ -35,9 +40,14 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertIn("default_reasoning_effort", first)
 
     def test_resolve_model_maps_agent_id(self) -> None:
-        model = resolve_model("crof/kimi-k3-eco")
+        model = resolve_model("anthropic/claude-fable-5")
 
-        self.assertEqual(model.agent_id, "base2-free-kimi-k3-eco")
+        self.assertEqual(model.agent_id, "base2-free-fable")
+
+    def test_resolve_honeypot_model_rejected(self) -> None:
+        # 🔴 2026-08-25：kimi-k3-eco 是官方 god-only 蜜罐，本地直接拒绝
+        with self.assertRaises(ValueError):
+            resolve_model("crof/kimi-k3-eco")
 
     def test_resolve_minimax_m3_maps_har_agent_id(self) -> None:
         model = resolve_model("minimax/minimax-m3")

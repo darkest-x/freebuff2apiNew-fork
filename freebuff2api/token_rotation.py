@@ -48,6 +48,43 @@ def is_account_banned(error_message: str) -> bool:
     return "banned" in error_message.lower()
 
 
+def parse_ban_resumes_at(error_message: str) -> float:
+    """从 ban 错误里解析上游给出的解封时间戳 ``resumes_at``（epoch 秒）。
+
+    [freebuff-proxy #198/#199 源码级实证] 官方临时封禁 body 形如
+    ``403 {"status":"banned","resumes_at":"..."}``，resumes_at 支持三种形态：
+    RFC3339 字符串 / unix 秒 / unix 毫秒。返回 0.0 表示没有该字段（硬封禁，
+    user.banned 布尔位，无解封时间 —— 只能走申诉）。
+    """
+    m = re.search(r"403\s+(\{.*\})", error_message)
+    if not m:
+        return 0.0
+    try:
+        payload = json.loads(m.group(1))
+    except ValueError:
+        return 0.0
+    resumes_at = payload.get("resumes_at")
+    if resumes_at in (None, ""):
+        return 0.0
+    # 数字形态：unix 秒或毫秒
+    try:
+        value = float(resumes_at)
+        if value > 1e12:  # 毫秒
+            value /= 1000.0
+        return value if value > time.time() else 0.0
+    except (TypeError, ValueError):
+        pass
+    # 字符串形态：ISO8601 / RFC3339
+    try:
+        parsed = datetime.fromisoformat(str(resumes_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        epoch = parsed.timestamp()
+        return epoch if epoch > time.time() else 0.0
+    except ValueError:
+        return 0.0
+
+
 def is_country_blocked(error_message: str) -> bool:
     """官方地区限制（status=country_blocked）。账号本身没问题，换 IP 可恢复。"""
     return "country_blocked" in error_message.lower()
