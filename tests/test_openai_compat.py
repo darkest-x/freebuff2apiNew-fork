@@ -160,8 +160,12 @@ class OpenAICompatTests(unittest.TestCase):
             trace_session_id="trace-1",
         )
 
-        self.assertEqual(payload["tools"][-1]["function"]["name"], "end_turn")
-        self.assertEqual(len(payload["tools"]), 2)
+        # 2026-08-25：官方骨架（27 个工具）在前，客户端工具转换后在尾部
+        names = [t["function"]["name"] for t in payload["tools"]]
+        self.assertEqual(names[-1], "get_weather")
+        self.assertIn("end_turn", names)
+        self.assertIn("search_mcp_tools", names)
+        self.assertGreater(len(payload["tools"]), 20)
 
     def test_build_upstream_payload_no_tools_no_end_turn(self) -> None:
         payload = build_upstream_payload(

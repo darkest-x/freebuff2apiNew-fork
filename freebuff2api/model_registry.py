@@ -388,8 +388,28 @@ def _parse_model_pools(
 
     Simplistic but sufficient: expand array literals with spread (``...FOO``) using
     previously parsed const-array definitions.
+
+    2026-08-25 增强：god-only 等池数组引用的是**模型对象常量**（如
+    ``KIMI_K3_ECO_MODEL``），其 id 藏在对象的 ``id: FREEBUFF_..._MODEL_ID``
+    字段里。这里额外解析「模型对象常量名 → id 值」映射，让这类引用也能展开。
     """
     pools: dict[str, set[str]] = {"premium": set(), "glm": set(), "god_only": set()}
+
+    # 模型对象常量（const NAME = { ... id: SOME_ID_CONST, ... }）→ 解析 id 值
+    model_object_ids: dict[str, str] = {}
+    for obj_match in re.finditer(
+        r"const\s+([A-Z0-9_]+_MODEL)\s*=\s*\{([^{}]*)", source
+    ):
+        obj_name = obj_match.group(1)
+        body = obj_match.group(2)
+        id_match = re.search(r"\bid:\s*([A-Za-z0-9_.]+)", body)
+        if not id_match:
+            continue
+        id_expr = id_match.group(1)
+        if id_expr in model_id_constants:
+            model_object_ids[obj_name] = model_id_constants[id_expr]
+        elif re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.:/-]+", id_expr):
+            model_object_ids[obj_name] = id_expr
 
     const_arrays: dict[str, list[str]] = {}
     array_re = re.compile(r"export\s+const\s+([A-Z0-9_]+)\s*=\s*\[([^\]]*)\]")
@@ -407,6 +427,8 @@ def _parse_model_pools(
                 items.append(lit)
             elif expr and expr in model_id_constants:
                 items.append(model_id_constants[expr])
+            elif expr and expr in model_object_ids:
+                items.append(model_object_ids[expr])
         const_arrays[name] = items
 
     pool_names = {
@@ -430,6 +452,8 @@ def _parse_model_pools(
                     pools[pool_kind].add(lit)
                 elif expr and expr in model_id_constants:
                     pools[pool_kind].add(model_id_constants[expr])
+                elif expr and expr in model_object_ids:
+                    pools[pool_kind].add(model_object_ids[expr])
     return pools
 
 

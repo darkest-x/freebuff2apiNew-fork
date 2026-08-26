@@ -7,6 +7,7 @@ from datetime import date
 from typing import Any
 
 from .codebuff import CodebuffError, FreebuffSession
+from .official_tools import rewrite_tools_for_upstream
 from .tool_schema import normalize_tool_schemas
 
 logger = logging.getLogger("freebuff2api.openai_compat")
@@ -291,23 +292,25 @@ def build_upstream_payload(
     payload["stream"] = True
     payload.setdefault("stop", ['"cb_easp"'])
 
-    # 工具数指纹：官方桌面端约 40 个工具，过多 MCP 工具（如 237 个）会被上游判定外来客户端。
-    # 超过 max_tools 时只保留前 N 个，降低风控概率。
+    # 工具集画像重写（2026-08-25 桌面版 MCP 架构对齐）：
+    # 新版桌面端支持 MCP 的方式是注入官方网关两件套 search_mcp_tools /
+    # call_mcp_tool（buildGatewayTools），tools 数组里永远是官方 snake_case
+    # 名字集合；mcp__* 只出现在消息历史。因此这里不再按数量截断，而是把
+    # 客户端工具混入官方骨架（threadToolSpecs(base, extra) 语义）——
+    # 官方 customToolDefinitions 本就合法，外来感来自名字风格而非存在本身。
     tools = payload.get("tools")
-    if isinstance(tools, list) and max_tools is not None and len(tools) > max_tools:
-        logger.warning(
-            "trimming tools from %s to %s to avoid foreign_toolset detection",
-            len(tools),
-            max_tools,
-        )
-        payload["tools"] = tools[:max_tools]
+    if isinstance(tools, list) and tools:
+        if max_tools is not None and len(tools) > max_tools:
+            logger.warning(
+                "trimming tools from %s to %s to avoid foreign_toolset detection",
+                len(tools),
+                max_tools,
+            )
+            payload["tools"] = tools[:max_tools]
+        payload["tools"] = rewrite_tools_for_upstream(payload["tools"])
 
     # 降低工具指纹：把客户端工具 schema 归一化成官方桌面端风格的干净 JSON Schema。
     normalize_tool_schemas(payload)
-
-    # 绕过上游 foreign_toolset 检测：带 tools 时注入官方专属名 end_turn（见 inject_end_turn_signature）
-    if payload.get("tools") is not None:
-        payload["tools"] = inject_end_turn_signature(payload["tools"])
 
     # reasoning_effort 按官方模型 efforts 表 clamp（防外来客户端指纹），
     # 然后从 OpenAI 标准顶层字段移到 codebuff_metadata.freebuff_reasoning_effort：

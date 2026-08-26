@@ -10,13 +10,14 @@ from .codebuff import FreebuffSession
 
 logger = logging.getLogger("freebuff2api.anthropic_compat")
 from .models import normalize_reasoning_effort, resolve_model
+from .official_tools import rewrite_tools_for_upstream
 from .openai_compat import (
     clamp_output_tokens,
-    inject_end_turn_signature,
     normalize_chat_messages,
     order_upstream_payload,
     raise_for_stream_error,
 )
+from .tool_schema import normalize_tool_schemas
 
 
 # ── Anthropic → OpenAI parameter mapping ──────────────────────────────
@@ -413,7 +414,9 @@ def build_anthropic_upstream_payload(
                 max_tools,
             )
             openai_tools = openai_tools[:max_tools]
-        payload["tools"] = inject_end_turn_signature(openai_tools)
+        # 2026-08-25 桌面版 MCP 架构对齐：官方骨架 + 客户端工具混入
+        # （替代旧的仅注入 end_turn；见 official_tools.rewrite_tools_for_upstream）
+        payload["tools"] = rewrite_tools_for_upstream(openai_tools)
 
     # Map tool_choice.
     tc = anthropic_tool_choice_to_openai(body.get("tool_choice"))
@@ -435,6 +438,8 @@ def build_anthropic_upstream_payload(
     if llm_step_number is not None:
         metadata["llm_step_number"] = llm_step_number
     payload["codebuff_metadata"] = metadata
+    # schema 归一化与 OpenAI 路径一致（官方桌面端风格干净 JSON Schema）
+    normalize_tool_schemas(payload)
     # [B2 待验证] 与 /v1/chat/completions 路径共用同一套键序，
     # 免得两条入站路径在上游看起来像两个不同客户端。
     return order_upstream_payload(payload)
