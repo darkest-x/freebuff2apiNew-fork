@@ -180,7 +180,7 @@ class SessionManagerTests(RegistryPinnedMixin, unittest.IsolatedAsyncioTestCase)
         )
 
         # mimo（unlimited 池）与 pro（premium 池）分属两个并发桶；
-        # 旧用例用 flash 当 unlimited 代表，2026-08-18 起 flash 已入 premium 池。
+        # 旧用例用 flash 当 unlimited 代表，2026-08-26 起官方把 flash 拨回 unlimited 池。
         first = await manager.acquire_session("mimo/mimo-v2.5")
         started = asyncio.Event()
 
@@ -213,7 +213,7 @@ class SessionManagerTests(RegistryPinnedMixin, unittest.IsolatedAsyncioTestCase)
         )
 
         with patch("freebuff2api.codebuff.CodebuffClient", PoolClient):
-            # mimo 恒为 unlimited 池（flash 2026-08-18 起已入 premium，
+            # mimo 恒为 unlimited 池（flash 2026-08-18 入 premium → 2026-08-26 回退，
             # balanced 模式下 premium 单账号单槽会串行化而非扇出）。
             pool = CodebuffAccountPool(settings)
             first = await pool.acquire_session("mimo/mimo-v2.5")

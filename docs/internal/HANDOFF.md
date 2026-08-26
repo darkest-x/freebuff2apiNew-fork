@@ -1,6 +1,6 @@
 # 项目交接文档（HANDOFF）
 
-> 更新：2026-08-18 | 分支：`main` | 最新提交：`de9b0ee`
+> 更新：2026-08-26 | 分支：`main` | 最新提交：`83e3c8f` → 待本次提交
 
 ## 1. 项目是什么
 将 Freebuff/Codebuff 的免费模型（DeepSeek V4 Pro/Flash、Luna、MiniMax M3、GLM 等）转成标准 OpenAI Chat Completions / Anthropic Messages API 的反代服务。
@@ -17,12 +17,14 @@
 - 账号池按 `rotation_mode` 选号（throughput / balanced / conservative）
 - 动态模型注册表每 6h 从 GitHub/jsDelivr 拉取，本地快照兜底，硬编码表最终兜底
 
-## 3. 额度与 session（官方 0.0.63 确认）
+## 3. 额度与 session（官方 2026-08-26 确认）
 - 扣费按 session 创建计，不是按对话条数
-- premium 池：每天 6 次 session，每次约 1 小时（+30min grace）
+- 并发桶：`FREEBUFF_DESKTOP_SESSION_LIMITS = {premium: 1, unlimited: 3}`（非每日额度）
+- 2026-08-26：`FREEBUFF_PER_MODEL_SESSION_CAPS` 已移除，配额全靠服务端 `rateLimitsByModel` 下发
+- 2026-08-26：flash 又被拨回 unlimited 语义（`FREEBUFF_PREMIUM_MODEL_IDS=[luna,pro]`）
 - 太平洋日重置 = 北京时间 15:00
 - session 跨 15:00 不会中断，按自身 expiresAt 存活；15:00 后新建才用新额度
-- 免费/unlimited 池：Flash/Mimo 不限额，但官方并发上限 3（我们只开 1 条保守）
+- 免费/unlimited 池：Flash/Mimo/Ox-Alpha，官方并发上限 3（我们只开 1 条保守）
 
 ## 4. 协议对齐（0.0.63）
 已对齐官方桌面端（通过 Anything Analyzer 会话 123 抓包对比）：
@@ -48,10 +50,13 @@
 - Provider usage error（402 + refill）：**不封账号**，透传友好错误给客户端
 - insufficient_quota 429：**不封账号**（是上游负载饱和，不是额度耗尽）
 
-## 6. 请求体保护与工具指纹
-- `FREEBUFF_MAX_REQUEST_BODY_BYTES` 默认 2097152（2MB，可在 Token 管理页用 MB 调整）
-- `FREEBUFF_MAX_TOOLS` 默认 50（官方桌面约 40，太多 MCP 工具 = 外来客户端指纹）
-- 超过工具数上限：只保留前 N 个，注入 `end_turn` 签名，不报错
+## 6. 请求体保护与工具指纹（2026-08-25 官方 27 工具骨架 + 客户端混入）
+- 官方桌面端发送 ~27 个工具（base3 8 + DESKTOP_EXTRA 4 + THREAD_TOOL_SPECS 13 + MCP 网关 2）
+- 我们的 `rewrite_tools_for_upstream`：优先注入官方 27 工具骨架（带简化 schema），
+  客户端工具重命名后追加（防冲突）；MCP 网关 `search_mcp_tools`/`call_mcp_tool` 保留
+- `FREEBUFF_MAX_REQUEST_BODY_BYTES` 默认 2097152（2MB）
+- `FREEBUFF_MAX_TOOLS` 启动时从官方 27 算起，MCP 网关不变，重命名后的客户端工具在上限内保留
+- 超过工具数上限：只保留前 N 个，不报错
 - 超过请求体：413 `request_body_too_large`，并写入日志
 - `FREEBUFF_MAX_MESSAGES` 默认 0（不限制），因为截断会导致模型丢上下文反复读文件
 

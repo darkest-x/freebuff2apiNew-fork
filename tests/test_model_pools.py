@@ -1,10 +1,13 @@
 """test_model_pools.py — 模型池归属与每模型配额判定的单元测试。
 
-背景（2026-08-24 用户指正）：
-1. DeepSeek V4 Flash 已于 2026-08-18 被官方移入 premium 池
-   （上游 freebuff-models.ts DEEPSEEK_V4_FLASH_MODEL.premium = true），
-   旧硬编码表把它当 unlimited 是过期认知；
-2. 各 premium 模型配额不同（共享池 + per-model caps：V4 Pro=1、Luna=2），
+背景（2026-08-26 桌面版 orchestrator.js + GitHub 镜像更新）：
+1. flash 的 premium 归属**又被官方撤销**：
+   `FREEBUFF_PREMIUM_MODEL_IDS = [luna, pro]`（无 flash），
+   `DEEPSEEK_V4_FLASH_MODEL.premium = false`、availability="off_peak_only"、
+   fallback=luna；`LIMITED_FREEBUFF_MODEL_IDS = [mimo, ox-alpha]`。
+   因此动态表 premium_ids 里没有 flash → unlimited bucket，硬编码兜底同步退回；
+2. 各 premium 模型配额不同（共享池 + per-model caps 曾：V4 Pro=1、Luna=2，
+   2026-08-26 该 caps 常量已从 orchestrator 移除，改由服务端 rateLimitsByModel 决定），
    判定耗尽必须按目标模型的 limit/recentCount，不能整池一刀切；
 3. 动态注册表需周期刷新（默认 2h），上游挪模型时自动跟随。
 """
@@ -56,22 +59,20 @@ class SessionBucketTests(unittest.TestCase):
     def tearDown(self) -> None:
         set_model_registry(None)
 
-    def test_fallback_flash_is_no_longer_unlimited(self) -> None:
-        # 🔴 核心回归：flash 不在兜底 unlimited 集合里（2026-08-18 起 premium）
-        self.assertNotIn("deepseek/deepseek-v4-flash", UNLIMITED_SESSION_MODEL_IDS)
-        self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "premium")
+    def test_fallback_flash_back_to_unlimited(self) -> None:
+        # 🔴 核心回归：flash 已回到兜底 unlimited 集合（2026-08-26 premium 撤销）
+        self.assertIn("deepseek/deepseek-v4-flash", UNLIMITED_SESSION_MODEL_IDS)
+        self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "unlimited")
 
     def test_fallback_mimo_is_unlimited(self) -> None:
         self.assertEqual(session_bucket_for_model("mimo/mimo-v2.5"), "unlimited")
 
-    def test_dynamic_table_moves_flash_back_when_upstream_does(self) -> None:
-        # 官方哪天把 flash 移回 unlimited（premium_ids 里没有 flash）→ 自动跟随
-        registry = _registry_with({"openai/gpt-5.6-luna", "deepseek/deepseek-v4-pro"})
-        set_model_registry(registry)
-        self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "unlimited")
+    def test_fallback_ox_alpha_is_unlimited(self) -> None:
+        # 2026-08-26 新模型：premium:false → unlimited 兜底
+        self.assertEqual(session_bucket_for_model("stealth/ox-alpha"), "unlimited")
 
-    def test_dynamic_table_keeps_flash_premium(self) -> None:
-        # 当前官方状态：flash 在 premium_ids → premium bucket
+    def test_dynamic_table_keeps_flash_premium_when_upstream_says_so(self) -> None:
+        # 假如上游哪天把 flash 挪回 premium（premium_ids 含 flash）→ 自动跟随
         registry = _registry_with(
             {
                 "deepseek/deepseek-v4-flash",
@@ -83,6 +84,14 @@ class SessionBucketTests(unittest.TestCase):
         self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "premium")
         # mimo 不在 premium 集合 → unlimited
         self.assertEqual(session_bucket_for_model("mimo/mimo-v2.5"), "unlimited")
+
+    def test_dynamic_table_matches_current_upstream_premium(self) -> None:
+        # 🔴 2026-08-26 官方现状：premium_ids=[luna, pro]，flash/ox/mimo → unlimited
+        registry = _registry_with({"openai/gpt-5.6-luna", "deepseek/deepseek-v4-pro"})
+        set_model_registry(registry)
+        self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "unlimited")
+        self.assertEqual(session_bucket_for_model("openai/gpt-5.6-luna"), "premium")
+        self.assertEqual(session_bucket_for_model("stealth/ox-alpha"), "unlimited")
 
     def test_empty_model_defaults_premium(self) -> None:
         self.assertEqual(session_bucket_for_model(""), "premium")
@@ -156,8 +165,9 @@ class PerModelQuotaTests(unittest.TestCase):
 class GodOnlyHoneypotTests(unittest.TestCase):
     """god-only（蜜罐）模型过滤：/v1/models 不广播、resolve 直接拒绝。
 
-    依据 freebuff-proxy #201/#140：luna-es 等被上游移入
-    FREEBUFF_WEB_GOD_ONLY_MODELS（隐藏评测路由），kimi-k3-eco 为文档级蜜罐；
+    依据 freebuff-proxy #201/#140 + 2026-08-26 官方源码：
+    `FREEBUFF_WEB_GOD_ONLY_MODELS = [KIMI_K3_ECO_MODEL, GPT_5_6_LUNA_ES_MODEL]`
+    （luna-es 是 2026-08-26 新增的第二个蜜罐）。kimi-k3-eco 为文档级蜜罐；
     第三方流量打过去形同"探测隐藏路由"，是封禁级暴露面。
     """
 
@@ -171,6 +181,11 @@ class GodOnlyHoneypotTests(unittest.TestCase):
         self.assertIn("crof/kimi-k3-eco", GOD_ONLY_MODEL_IDS)
         self.assertTrue(is_god_only_model("crof/kimi-k3-eco"))
 
+    def test_luna_es_in_fallback_god_only(self) -> None:
+        # 2026-08-26 新增第二个蜜罐
+        self.assertIn("openai/gpt-5.6-luna-es", GOD_ONLY_MODEL_IDS)
+        self.assertTrue(is_god_only_model("openai/gpt-5.6-luna-es"))
+
     def test_core_models_not_honeypot(self) -> None:
         for model in (
             "deepseek/deepseek-v4-flash",
@@ -182,10 +197,13 @@ class GodOnlyHoneypotTests(unittest.TestCase):
     def test_resolve_rejects_honeypot(self) -> None:
         with self.assertRaises(ValueError):
             resolve_model("crof/kimi-k3-eco")
+        with self.assertRaises(ValueError):
+            resolve_model("openai/gpt-5.6-luna-es")
 
     def test_models_list_does_not_broadcast_honeypot(self) -> None:
         ids = {m.id for m in all_models()}
         self.assertNotIn("crof/kimi-k3-eco", ids)
+        self.assertNotIn("openai/gpt-5.6-luna-es", ids)
         # 三条主力线必须仍在服务列表里
         for required in (
             "deepseek/deepseek-v4-flash",
@@ -195,16 +213,16 @@ class GodOnlyHoneypotTests(unittest.TestCase):
             self.assertIn(required, ids)
 
     def test_dynamic_table_can_flag_new_honeypot(self) -> None:
-        # 上游哪天把别的模型挪进 god-only（如 luna-es）→ 动态表自动跟随过滤
+        # 动态表添加新蜜罐（如 future god-only）→ 自动跟随过滤
         registry = _registry_with({"deepseek/deepseek-v4-pro"})
-        registry._table.god_only_ids = {"openai/gpt-5.6-luna-es"}
+        registry._table.god_only_ids = {"some/new-mole"}
         registry._table.models.append(
-            DynamicModelEntry(id="openai/gpt-5.6-luna-es", agent_id="a")
+            DynamicModelEntry(id="some/new-mole", agent_id="a")
         )
         set_model_registry(registry)
-        self.assertTrue(is_god_only_model("openai/gpt-5.6-luna-es"))
+        self.assertTrue(is_god_only_model("some/new-mole"))
         with self.assertRaises(ValueError):
-            resolve_model("openai/gpt-5.6-luna-es")
+            resolve_model("some/new-mole")
 
 
 class RefreshIntervalTests(unittest.TestCase):

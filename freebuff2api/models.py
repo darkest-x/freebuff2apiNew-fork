@@ -36,7 +36,7 @@ class FreebuffModel:
         return self.session_model_id or self.upstream_id
 
 
-# 硬编码兜底表（2026-08 从官方 orchestrator.txt freebuff-model-ids.ts / free-agents.ts 提取）。
+# 硬编码兜底表（2026-08-26 从官方 orchestrator.js freebuff-model-ids.ts / free-agents.ts 提取）。
 # 动态注册表刷新失败或官方源不可用时使用；正常情况下 resolve_model 优先查动态表。
 FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
     FreebuffModel(
@@ -111,20 +111,39 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reasoning_efforts=("minimal", "low", "medium", "high", "xhigh"),
         default_reasoning_effort="xhigh",
     ),
+    # 2026-08-26 新增：ox-alpha，Anonymous provider，premium: false，1M 上下文
+    FreebuffModel(
+        "stealth/ox-alpha",
+        "base2-free-ox-alpha",
+        base3_agent_id="base3-free-ox-alpha",
+        reviewer_agent_id="code-reviewer-ox-alpha",
+        context_window=1_000_000,
+        reasoning_efforts=("low", "high", "max"),
+        default_reasoning_effort="high",
+    ),
 )
 
 DEFAULT_MODEL = FREEBUFF_MODELS[0]
 
 # 官方 desktop session bucket 的**硬编码兜底**（仅动态注册表不可用时生效）。
 #
-# 🔴 2026-08-24 更正：flash 已于 2026-08-18 被官方移入 premium 池
-# （上游 freebuff-models.ts：DEEPSEEK_V4_FLASH_MODEL.premium = true，
-# 注释原文 "Unlimited is MiMo 2.5 while this holds"）。旧表把 flash 当
-# unlimited 是过期认知 —— 正确性现在由 model_registry 动态维护，
-# 这里只保留"注册表从未成功加载过"时的最后兜底。
+# 🔴 2026-08-26 更正（桌面版 orchestrator.js）：
+# flash 的 pool 归属**又被官方拨回 unlimited 语义**：
+#   - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, pro]`（flash 已不在其中）
+#   - `DEEPSEEK_V4_FLASH_MODEL.premium = false`、availability="off_peak_only"、
+#     unavailableFallback=luna（2026-08-18 的 premium=true 被撤销）
+#   - `LIMITED_FREEBUFF_MODEL_IDS = [mimo, ox-alpha]`，flash 也不在 limited 池
+#   - 但 desktop bucket 集合 `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS` 仍是
+#     [luna, pro, glm] —— flash 被请出 premium 并发桶
+# 正确性由 model_registry 动态维护（2h 刷新跟随），这里只保留
+# "注册表从未成功加载过"时的最后兜底。
 UNLIMITED_SESSION_MODEL_IDS = frozenset(
     {
         "mimo/mimo-v2.5",
+        # 2026-08-26：flash 挪回非 premium 语义，兜底同步跟进（动态表为准）
+        "deepseek/deepseek-v4-flash",
+        # 2026-08-26：ox-alpha 为 premium:false 的免费模型，同属 unlimited 兜底
+        "stealth/ox-alpha",
     }
 )
 
@@ -135,7 +154,14 @@ GLM_POOL_MODEL_IDS = frozenset({"z-ai/glm-5.2"})
 # 路由，真实客户端不可达；第三方流量打过去形同"探测隐藏路由"，是封禁级暴露面
 # （freebuff-proxy #201 luna-es 实证 + AGENTS.md kimi-k3-eco 记载）。动态注册表
 # 优先，此处仅兜底。
-GOD_ONLY_MODEL_IDS = frozenset({"crof/kimi-k3-eco"})
+#   - 2026-08-26：`FREEBUFF_WEB_GOD_ONLY_MODELS = [KIMI_K3_ECO_MODEL, GPT_5_6_LUNA_ES_MODEL]`
+#     （luna-es `openai/gpt-5.6-luna-es` 是新版的第二个蜜罐）
+GOD_ONLY_MODEL_IDS = frozenset(
+    {
+        "crof/kimi-k3-eco",
+        "openai/gpt-5.6-luna-es",
+    }
+)
 
 
 def _dynamic_god_only_ids() -> frozenset[str] | None:
@@ -168,9 +194,9 @@ def _dynamic_premium_ids() -> frozenset[str] | None:
 def session_bucket_for_model(model: str) -> str:
     """返回官方 desktop session bucket：``premium`` 或 ``unlimited``。
 
-    判定优先级（2026-08-24 起）：
-    1. 动态注册表的 premium_ids —— 上游把模型在池间挪动（如 flash 入 premium）
-       时 2 小时内自动跟随，无需改代码部署；
+    判定优先级（2026-08-26 更新）：
+    1. 动态注册表的 premium_ids —— 上游把模型在池间挪动（如 flash 2026-08-18 入
+       premium、2026-08-26 又回退 unlimited）时 N 小时内自动跟随，无需改代码部署；
     2. 硬编码 UNLIMITED_SESSION_MODEL_IDS 兜底（注册表不可用时）。
 
     GLM 池在并发桶语义上仍占 premium 桶（官方 DESKTOP_PREMIUM_BUCKET 是

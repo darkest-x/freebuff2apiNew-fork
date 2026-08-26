@@ -21,7 +21,7 @@ class RotationModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_balanced_unlimited_fans_out_across_accounts(self) -> None:
         pool = CodebuffAccountPool(_settings(mode="balanced"))
 
-        # mimo 恒为 unlimited 池（flash 2026-08-18 起已入 premium）。
+        # mimo 恒为 unlimited 池（flash 2026-08-18 入 premium → 2026-08-26 又回退 unlimited）。
         first = pool._next_available_index("mimo/mimo-v2.5")
         await pool._reserve_account("mimo/mimo-v2.5")
         second = pool._next_available_index("mimo/mimo-v2.5")
@@ -201,7 +201,7 @@ class RotationModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_conservative_unlimited_uses_only_first_account(self) -> None:
         pool = CodebuffAccountPool(_settings(mode="conservative"))
 
-        # mimo 恒为 unlimited 池（flash 2026-08-18 起已入 premium）。
+        # mimo 恒为 unlimited 池（flash 2026-08-18 入 premium → 2026-08-26 又回退 unlimited）。
         first = pool._next_available_index("mimo/mimo-v2.5")
         self.assertEqual(first, 0)
 

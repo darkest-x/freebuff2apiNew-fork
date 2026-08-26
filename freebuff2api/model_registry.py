@@ -37,7 +37,7 @@ SOURCES: dict[str, list[str]] = {
 
 REFRESH_INTERVAL_SECONDS = int(
     os.getenv("FREEBUFF_MODEL_REFRESH_SECONDS", str(2 * 60 * 60))
-)  # 默认 2h：上游挪模型/改配额（flash 入 premium 只提前了注释没发版）也能当天跟随
+)  # 默认 2h：上游挪模型/改配额（flash 2026-08-18 入 premium → 2026-08-26 又回退）也能当天跟随
 FETCH_TIMEOUT_SECONDS = 10.0
 SNAPSHOT_PATH = Path(__file__).parent / "model_registry_snapshot.json"
 
@@ -168,8 +168,7 @@ class ModelRegistry:
     def start_background_refresh(self) -> None:
         """启动后台守护线程：立即抓取一次，之后每 REFRESH_INTERVAL_SECONDS 循环。
 
-        🔴 2026-08-24 修复：旧实现只抓一次就退出线程 —— "每 6h 刷新"从未真实
-        发生，flash 入 premium 这类上游变动只能靠重新部署感知。现改为常驻循环，
+        🔴 2026-08-26 修复：旧实现只抓一次就退出线程，上游变动（flash 入 premium 又回退）
         默认 2h 一拍（用户要求"最少两小时更新"），失败不中断（沿用上一张表）。
         """
         def _run() -> None:
