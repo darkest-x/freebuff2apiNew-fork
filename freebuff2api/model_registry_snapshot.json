@@ -1,5 +1,5 @@
 {
-  "fetched_at": 1787783784.5482652,
+  "fetched_at": 1787818514.1430428,
   "models": [
     {
       "id": "mimo/mimo-v2.5",
@@ -38,6 +38,12 @@
       "reviewer_agent_id": "code-reviewer-glm"
     },
     {
+      "id": "z-ai/glm-5.3-flash",
+      "agent_id": "base2-free-glm-5-3-flash",
+      "base3_agent_id": "base3-free-glm-5-3-flash",
+      "reviewer_agent_id": "code-reviewer-glm-5-3-flash"
+    },
+    {
       "id": "crof/kimi-k3-eco",
       "agent_id": "base2-free-kimi-k3-eco",
       "base3_agent_id": "base3-free-kimi-k3-eco",
@@ -70,10 +76,10 @@
   ],
   "premium_ids": [
     "crof/kimi-k3-eco",
-    "deepseek/deepseek-v4-pro",
     "meta/muse-spark-1.2-contributor",
     "openai/gpt-5.6-luna",
-    "openai/gpt-5.6-luna-es"
+    "openai/gpt-5.6-luna-es",
+    "z-ai/glm-5.3-flash"
   ],
   "glm_ids": [
     "z-ai/glm-5.2"

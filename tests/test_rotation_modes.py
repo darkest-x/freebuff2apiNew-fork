@@ -35,13 +35,15 @@ class RotationModeTests(unittest.IsolatedAsyncioTestCase):
         pool = CodebuffAccountPool(_settings(mode="balanced"))
         pool._premium_index = 0
 
-        first = await pool._reserve_account("deepseek/deepseek-v4-pro")
+        # 🔴 2026-08-27：pro 已掉出 premium 池（bucket 仅 [luna, glm-5.2, glm-5.3-flash]），
+        # premium 单账号语义用 luna 作为代表模型。
+        first = await pool._reserve_account("openai/gpt-5.6-luna")
         # 第一条 premium 通道被占用后，第二条不可选（即使还有第二个账号）
-        self.assertIsNone(pool._next_available_index("deepseek/deepseek-v4-pro"))
+        self.assertIsNone(pool._next_available_index("openai/gpt-5.6-luna"))
 
-        await pool.release(first, "deepseek/deepseek-v4-pro")
+        await pool.release(first, "openai/gpt-5.6-luna")
         # 释放后仍优先使用原来的 premium 账号（串行轮换，不是并发）
-        self.assertEqual(pool._next_available_index("deepseek/deepseek-v4-pro"), first)
+        self.assertEqual(pool._next_available_index("openai/gpt-5.6-luna"), first)
         await pool.aclose()
 
     async def test_balanced_premium_rotates_on_normal_429(self) -> None:
@@ -66,12 +68,12 @@ class RotationModeTests(unittest.IsolatedAsyncioTestCase):
             0,
             "Codebuff request failed: account banned - Freebuff account banned",
             status_code=403,
-            model="deepseek/deepseek-v4-pro",
+            model="openai/gpt-5.6-luna",
         )
-        self.assertIsNone(pool._next_available_index("deepseek/deepseek-v4-pro"))
+        self.assertIsNone(pool._next_available_index("openai/gpt-5.6-luna"))
 
         with self.assertRaises(CodebuffError) as ctx:
-            await pool.acquire_session("deepseek/deepseek-v4-pro")
+            await pool.acquire_session("openai/gpt-5.6-luna")
         self.assertEqual(ctx.exception.status_code, 403)
         await pool.aclose()
 
@@ -82,14 +84,14 @@ class RotationModeTests(unittest.IsolatedAsyncioTestCase):
             0,
             "Codebuff request failed: account banned - Freebuff account banned",
             status_code=403,
-            model="deepseek/deepseek-v4-pro",
+            model="openai/gpt-5.6-luna",
         )
         self.assertEqual(pool._invalid_reasons[0], "banned")
         self.assertGreater(pool._premium_banned_until, 0)
-        self.assertIsNone(pool._next_available_index("deepseek/deepseek-v4-pro"))
+        self.assertIsNone(pool._next_available_index("openai/gpt-5.6-luna"))
 
         with self.assertRaises(CodebuffError):
-            await pool.acquire_session("deepseek/deepseek-v4-pro")
+            await pool.acquire_session("openai/gpt-5.6-luna")
         await pool.aclose()
 
     async def test_acquire_session_rate_limited_tries_next_account(self) -> None:

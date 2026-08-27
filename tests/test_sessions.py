@@ -157,10 +157,13 @@ class SessionManagerTests(RegistryPinnedMixin, unittest.IsolatedAsyncioTestCase)
             Settings(codebuff_token="token", local_api_key=None),
         )
 
-        session = await manager.ensure_session("moonshotai/kimi-k2.6")
+        # 🔴 2026-08-27：pro 掉出 premium 池（bucket 仅 [luna, glm-5.2, glm-5.3-flash]），
+        # 旧会话（pro）与目标模型 mimo 同属 unlimited 通道 → 同通道换模型必须
+        # 先删旧 session 再建新 session。kimi-k2.6 是已废弃的旧映射 ID，顺手换成 mimo。
+        session = await manager.ensure_session("mimo/mimo-v2.5")
 
         self.assertEqual(session.instance_id, "kimi-instance")
-        self.assertEqual(session.model, "moonshotai/kimi-k2.6")
+        self.assertEqual(session.model, "mimo/mimo-v2.5")
         self.assertEqual(
             client.calls,
             [
@@ -168,7 +171,7 @@ class SessionManagerTests(RegistryPinnedMixin, unittest.IsolatedAsyncioTestCase)
                 ("delete_session", "deepseek-instance"),
                 ("request_ads", "gravity", [], "waiting_room"),
                 ("request_ads", "carbon", [], "waiting_room"),
-                ("create_session", "moonshotai/kimi-k2.6"),
+                ("create_session", "mimo/mimo-v2.5"),
             ],
         )
 
@@ -179,14 +182,15 @@ class SessionManagerTests(RegistryPinnedMixin, unittest.IsolatedAsyncioTestCase)
             Settings(codebuff_token="token", local_api_key=None),
         )
 
-        # mimo（unlimited 池）与 pro（premium 池）分属两个并发桶；
-        # 旧用例用 flash 当 unlimited 代表，2026-08-26 起官方把 flash 拨回 unlimited 池。
+        # mimo（unlimited 池）与 luna（premium 池）分属两个并发桶；
+        # 🔴 2026-08-27：官方 premium bucket 只剩 [luna, glm-5.2, glm-5.3-flash]，
+        # pro 已掉进 unlimited 桶，不能再当 premium 代表 → premium 代表换成 luna。
         first = await manager.acquire_session("mimo/mimo-v2.5")
         started = asyncio.Event()
 
         async def acquire_second():
             started.set()
-            return await manager.acquire_session("deepseek/deepseek-v4-pro")
+            return await manager.acquire_session("openai/gpt-5.6-luna")
 
         task = asyncio.create_task(acquire_second())
         await started.wait()
@@ -194,7 +198,7 @@ class SessionManagerTests(RegistryPinnedMixin, unittest.IsolatedAsyncioTestCase)
         try:
             # premium 通道不会被 unlimited 通道阻塞；两个会话同时存在
             self.assertEqual(first.session.model, "mimo/mimo-v2.5")
-            self.assertEqual(second.session.model, "deepseek/deepseek-v4-pro")
+            self.assertEqual(second.session.model, "openai/gpt-5.6-luna")
             # unlimited 通道的 session 没有被删除
             self.assertNotIn(
                 ("delete_session", "mimo/mimo-v2.5-instance", "mimo/mimo-v2.5"),

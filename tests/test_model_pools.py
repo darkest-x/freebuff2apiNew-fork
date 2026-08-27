@@ -1,15 +1,17 @@
 """test_model_pools.py — 模型池归属与每模型配额判定的单元测试。
 
-背景（2026-08-26 桌面版 orchestrator.js + GitHub 镜像更新）：
-1. flash 的 premium 归属**又被官方撤销**：
-   `FREEBUFF_PREMIUM_MODEL_IDS = [luna, pro]`（无 flash），
-   `DEEPSEEK_V4_FLASH_MODEL.premium = false`、availability="off_peak_only"、
-   fallback=luna；`LIMITED_FREEBUFF_MODEL_IDS = [mimo, ox-alpha]`。
-   因此动态表 premium_ids 里没有 flash → unlimited bucket，硬编码兜底同步退回；
-2. 各 premium 模型配额不同（共享池 + per-model caps 曾：V4 Pro=1、Luna=2，
-   2026-08-26 该 caps 常量已从 orchestrator 移除，改由服务端 rateLimitsByModel 决定），
-   判定耗尽必须按目标模型的 limit/recentCount，不能整池一刀切；
-3. 动态注册表需周期刷新（默认 2h），上游挪模型时自动跟随。
+背景（2026-08-27 桌面版 orchestrator.js 更新）：
+1. premium 池二次收缩：`FREEBUFF_PREMIUM_MODEL_IDS = [luna, glm-5.3-flash]`
+   （08-26 是 [luna, pro]）→ deepseek-v4-pro 掉出 premium；
+   `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, glm-5.3-flash]`
+   → pro 与 minimax-m3 在桌面端归 unlimited 通道；
+2. 新模型 `z-ai/glm-5.3-flash`（1M ctx，premium，且官方为它复活了 per-model
+   caps：limit=2 / pool glm_v53_flash）；
+3. `LIMITED_FREEBUFF_MODEL_IDS = [mimo]`（ox-alpha 被移出）、
+   `FREEBUFF_WEB_GEO_EXEMPT_MODEL_IDS = [mimo]`，新增 `FREEBUFF_WEB_LIMITED_MODEL_IDS`；
+4. flash / ox-alpha / mimo 仍非 premium；判定耗尽须按目标模型
+   limit/recentCount，不能整池一刀切；
+5. 动态注册表周期刷新（默认 2h），上游挪模型时自动跟随。
 """
 
 import unittest
@@ -71,6 +73,18 @@ class SessionBucketTests(unittest.TestCase):
         # 2026-08-26 新模型：premium:false → unlimited 兜底
         self.assertEqual(session_bucket_for_model("stealth/ox-alpha"), "unlimited")
 
+    def test_fallback_pro_and_m3_moved_to_unlimited(self) -> None:
+        # 🔴 2026-08-27：pro 与 minimax-m3 掉出官方 premium 池（bucket 仅
+        # [luna, glm-5.2, glm-5.3-flash]）→ 兜底集合同步跟进
+        self.assertIn("deepseek/deepseek-v4-pro", UNLIMITED_SESSION_MODEL_IDS)
+        self.assertIn("minimax/minimax-m3", UNLIMITED_SESSION_MODEL_IDS)
+        self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-pro"), "unlimited")
+        self.assertEqual(session_bucket_for_model("minimax/minimax-m3"), "unlimited")
+
+    def test_fallback_glm_53_flash_is_premium(self) -> None:
+        # 2026-08-27 新模型：premium:true（还有独立 per-model cap=2 池）→ premium 兜底
+        self.assertEqual(session_bucket_for_model("z-ai/glm-5.3-flash"), "premium")
+
     def test_dynamic_table_keeps_flash_premium_when_upstream_says_so(self) -> None:
         # 假如上游哪天把 flash 挪回 premium（premium_ids 含 flash）→ 自动跟随
         registry = _registry_with(
@@ -86,11 +100,14 @@ class SessionBucketTests(unittest.TestCase):
         self.assertEqual(session_bucket_for_model("mimo/mimo-v2.5"), "unlimited")
 
     def test_dynamic_table_matches_current_upstream_premium(self) -> None:
-        # 🔴 2026-08-26 官方现状：premium_ids=[luna, pro]，flash/ox/mimo → unlimited
-        registry = _registry_with({"openai/gpt-5.6-luna", "deepseek/deepseek-v4-pro"})
+        # 🔴 2026-08-27 官方现状：premium_ids=[luna, glm-5.3-flash]，
+        # pro / flash / ox / mimo → unlimited；glm-5.3-flash 新队员进 premium
+        registry = _registry_with({"openai/gpt-5.6-luna", "z-ai/glm-5.3-flash"})
         set_model_registry(registry)
         self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "unlimited")
+        self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-pro"), "unlimited")
         self.assertEqual(session_bucket_for_model("openai/gpt-5.6-luna"), "premium")
+        self.assertEqual(session_bucket_for_model("z-ai/glm-5.3-flash"), "premium")
         self.assertEqual(session_bucket_for_model("stealth/ox-alpha"), "unlimited")
 
     def test_empty_model_defaults_premium(self) -> None:

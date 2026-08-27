@@ -88,6 +88,19 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reviewer_agent_id="code-reviewer-glm",
         context_window=131_072,
     ),
+    # 2026-08-27 新增：GLM 5.3 Flash（官方 orchestrator.js 87241-87250），
+    # premium: true、multimodal、1M 上下文；agent 映射
+    # base2-free-glm-5-3-flash / base3-free-glm-5-3-flash / code-reviewer-glm-5-3-flash。
+    # ⚠️ 官方为它单独开了 FREEBUFF_PER_MODEL_SESSION_CAPS（limit=2，pool glm_v53_flash），
+    # 2026-08-26 移除的 per-model caps 常量本轮为它复活；非 referral 解锁（GLM 5.2 才是）。
+    FreebuffModel(
+        "z-ai/glm-5.3-flash",
+        "base2-free-glm-5-3-flash",
+        base3_agent_id="base3-free-glm-5-3-flash",
+        reviewer_agent_id="code-reviewer-glm-5-3-flash",
+        context_window=1_000_000,
+        input_modalities=("text", "image"),
+    ),
     FreebuffModel(
         "crof/kimi-k3-eco",
         "base2-free-kimi-k3-eco",
@@ -127,19 +140,23 @@ DEFAULT_MODEL = FREEBUFF_MODELS[0]
 
 # 官方 desktop session bucket 的**硬编码兜底**（仅动态注册表不可用时生效）。
 #
-# 🔴 2026-08-26 更正（桌面版 orchestrator.js）：
-# flash 的 pool 归属**又被官方拨回 unlimited 语义**：
-#   - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, pro]`（flash 已不在其中）
-#   - `DEEPSEEK_V4_FLASH_MODEL.premium = false`、availability="off_peak_only"、
-#     unavailableFallback=luna（2026-08-18 的 premium=true 被撤销）
-#   - `LIMITED_FREEBUFF_MODEL_IDS = [mimo, ox-alpha]`，flash 也不在 limited 池
-#   - 但 desktop bucket 集合 `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS` 仍是
-#     [luna, pro, glm] —— flash 被请出 premium 并发桶
+# 🔴 2026-08-27 更正（桌面版 orchestrator.js 08-27 13:47 更新）：
+# 官方 premium 池再次收缩：
+#   - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, glm-5.3-flash]`（**deepseek-v4-pro 掉出**）
+#   - `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, glm-5.3-flash]`
+#     （08-26 是 [luna, pro, glm-5.2]）→ pro 与 minimax-m3 在桌面端归 **unlimited** 通道
+#   - `LIMITED_FREEBUFF_MODEL_IDS = [mimo]`（ox-alpha 被移出）
+#   - `FREEBUFF_WEB_GEO_EXEMPT_MODEL_IDS = [mimo]`；新增 `FREEBUFF_WEB_LIMITED_MODEL_IDS`
+#   - glm-5.3-flash 单独 `FREEBUFF_PER_MODEL_SESSION_CAPS {limit:2, pool:"glm_v53_flash"}`
 # 正确性由 model_registry 动态维护（2h 刷新跟随），这里只保留
-# "注册表从未成功加载过"时的最后兜底。
+# "注册表从未成功加载过"时的最后兜底，镜像官方桌面 premium 桶补集。
 UNLIMITED_SESSION_MODEL_IDS = frozenset(
     {
         "mimo/mimo-v2.5",
+        # 2026-08-27：pro 与 m3 掉出官方 premium 池 → 桌面端 unlimited 通道，
+        # 兜底同步跟进（动态表为准）
+        "deepseek/deepseek-v4-pro",
+        "minimax/minimax-m3",
         # 2026-08-26：flash 挪回非 premium 语义，兜底同步跟进（动态表为准）
         "deepseek/deepseek-v4-flash",
         # 2026-08-26：ox-alpha 为 premium:false 的免费模型，同属 unlimited 兜底
@@ -147,7 +164,9 @@ UNLIMITED_SESSION_MODEL_IDS = frozenset(
     }
 )
 
-# GLM 5.2：referral 解锁、独立周/日池，绝不落入共享 premium 日额度
+# GLM 5.2：referral 解锁、独立周/日池，绝不落入共享 premium 日额度。
+# ⚠️ 2026-08-27：glm-5.3-flash 是独立的 per-model cap 池（limit=2），不是 referral 门，
+# 不进本 fail-fast 集合（app 里 GLM_POOL 同时驱动"无权益 403 fail-fast"逻辑）。
 GLM_POOL_MODEL_IDS = frozenset({"z-ai/glm-5.2"})
 
 # 🔴 蜜罐/god-only 模型（官方 FREEBUFF_WEB_GOD_ONLY_MODELS 兜底）：上游隐藏评测
@@ -156,6 +175,7 @@ GLM_POOL_MODEL_IDS = frozenset({"z-ai/glm-5.2"})
 # 优先，此处仅兜底。
 #   - 2026-08-26：`FREEBUFF_WEB_GOD_ONLY_MODELS = [KIMI_K3_ECO_MODEL, GPT_5_6_LUNA_ES_MODEL]`
 #     （luna-es `openai/gpt-5.6-luna-es` 是新版的第二个蜜罐）
+#   - 2026-08-27 复核：god-only 集合未变，仍为这两个蜜罐
 GOD_ONLY_MODEL_IDS = frozenset(
     {
         "crof/kimi-k3-eco",
