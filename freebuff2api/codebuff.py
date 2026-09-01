@@ -334,29 +334,22 @@ class CodebuffClient:
     ) -> dict[str, Any]:
         """查询当前 session 状态。
 
-        🔴 2026-08-25 全面禁发 `x-freebuff-include-unused-rate-limits`
-        （freebuff-proxy #140 源码级实证）：官方 vendored CLI 定义了该常量但
-        **从不发送**；只有 Web/Desktop 与第三方代理发，且上游把它当指证第三方
-        代理的证据（netroindonesia 案例）。保留形参仅为兼容旧调用方，发了也会
-        被忽略。
+        ⚠️ `x-freebuff-include-unused-rate-limits` 的禁发范围**仅限通用查询/心跳
+        路径**（freebuff-proxy #140 源码级实证：官方 vendored **CLI** 定义了该常量
+        但从不发送，第三方代理多发它被指证）。**桌面端（我们伪装的画像）例外**：
+        0.0.79 桌面版 SessionManager.refreshTier() 在额度全量刷新时**会**带
+        ``x-freebuff-include-unused-rate-limits: 1``（orchestrator.js 125163）。
+        因此本方法把两路 GET 显式分开：
 
-        🟢 2026-09-01 0.0.79 桌面版抓包（orchestrator.js 87595-87620 / 125163）发现
-        两种 GET 请求共存，必须严格区分，否则请求头组合会触风控：
+        👉 **通用查询 / 心跳路径**（本方法默认，`refresh_tier=False`）：
+           GET /session + multi-session + 可选 instance-id，**不带** include-unused。
+           响应 7 字段最小 body；额度快照从 POST /session 的 admission 响应取。
 
-        - **心跳**（heartbeat）路径：``GET /session`` + ``x-freebuff-heartbeat:1``
-          + ``x-freebuff-instance-id`` + ``x-freebuff-multi-session:1``；响应是
-          最小 7 字段（``status/accessTier/instanceId/model/admittedAt/expiresAt/
-          remainingMs``），超时 ``SESSION_HEARTBEAT_TIMEOUT_MS = 10000``。
-          官方 `SessionManager.beatableThreads()` 走这条路径防 30 min grace 回收。
-        - **额度全量刷新**（refresh_tier）路径：``GET /session`` +
-          ``x-freebuff-multi-session:1`` + ``x-freebuff-include-unused-rate-limits:1``
-          （**带 include-unused**，但**不带 heartbeat 与 instance-id**）；
-          响应是完整 ``rateLimitsByModel + desktopSessionCounts``。
-          官方 `SessionManager.refreshTier()` 走这条路径拉额度快照。
-
-        ⚠️ 关键反指纹点（2026-08-19 baseline）：混用这两个头 = 既不是心跳也
-        不是 refresh tier = 上游 detectForeignFreebuffClient 会标"第三方代理"
-        并降级。本方法把这两个路径显式分开，由调用方按场景选择。
+        👉 **额度全量刷新路径**（`refresh_tier=True`）：GET /session +
+           multi-session + **include-unused-rate-limits: 1**（不带 heartbeat /
+           instance-id）；响应带 rateLimitsByModel + desktopSessionCounts。
+           🔴 该路径与 CLI 指纹冲突，**仅**在伪装桌面端时使用；当前无调用方
+           （反代额度快照从 admission 取已足够），保留为忠实表达官方路径。
         """
         if refresh_tier:
             # 额度全量刷新：带 include-unused，不带 heartbeat 与 instance-id

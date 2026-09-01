@@ -69,6 +69,15 @@ class DynamicModelTable:
     models: list[DynamicModelEntry]
     premium_ids: set[str] = field(default_factory=set)
     glm_ids: set[str] = field(default_factory=set)
+    # 🟢 0.0.79 新增：桌面端 premium 并发桶
+    # `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, solar-pro4]`。
+    # 与 premium_ids 的区别很重要：
+    #   - premium_ids    = FREEBUFF_PREMIUM_MODEL_IDS（桌面端真 premium 池）—— 已排除
+    #                      WEB_PREMIUM 混入（见 _parse_model_pools 注释，kimi/luna-es/muse
+    #                      都在 web premium 但走各自通道，绝不能进 bucket 判定）
+    #   - desktop_bucket = premium ∪ GLM（桌面端并发桶语义，session_bucket_for_model 用它）
+    # GitHub main 可能滞后桌面版，该常量缺失时回退 premium_ids。
+    desktop_bucket_ids: set[str] = field(default_factory=set)
     # 🔴 蜜罐/god-only 模型（FREEBUFF_WEB_GOD_ONLY_MODELS）：上游隐藏的评测路由，
     # 真实客户端不可达；第三方流量打过去形同"探测隐藏路由"（#201 luna-es 实证，
     # kimi-k3-eco 为文档级蜜罐）。必须过滤出服务列表且拒绝 resolve。
@@ -240,6 +249,7 @@ class ModelRegistry:
         return DynamicModelTable(
             models=models,
             premium_ids=pools["premium"],
+            desktop_bucket_ids=pools["desktop_bucket"],
             glm_ids=pools["glm"],
             god_only_ids=pools["god_only"],
         )
@@ -257,6 +267,7 @@ class ModelRegistry:
                 for model in table.models
             ],
             "premium_ids": sorted(table.premium_ids),
+            "desktop_bucket_ids": sorted(table.desktop_bucket_ids),
             "glm_ids": sorted(table.glm_ids),
             "god_only_ids": sorted(table.god_only_ids),
         }
@@ -273,6 +284,11 @@ class ModelRegistry:
                 for item in data.get("models", [])
             ],
             premium_ids=set(data.get("premium_ids", [])),
+            # 快照来自旧版本时无该字段 → 回退 premium_ids（见 dataclass 注释）
+            desktop_bucket_ids=set(
+                data.get("desktop_bucket_ids")
+                or data.get("premium_ids", [])
+            ),
             glm_ids=set(data.get("glm_ids", [])),
             god_only_ids=set(data.get("god_only_ids", [])),
             fetched_at=float(data.get("fetched_at") or time.time()),
@@ -392,7 +408,12 @@ def _parse_model_pools(
     ``KIMI_K3_ECO_MODEL``），其 id 藏在对象的 ``id: FREEBUFF_..._MODEL_ID``
     字段里。这里额外解析「模型对象常量名 → id 值」映射，让这类引用也能展开。
     """
-    pools: dict[str, set[str]] = {"premium": set(), "glm": set(), "god_only": set()}
+    pools: dict[str, set[str]] = {
+        "premium": set(),
+        "desktop_bucket": set(),
+        "glm": set(),
+        "god_only": set(),
+    }
 
     # 模型对象常量（const NAME = { ... id: SOME_ID_CONST, ... }）→ 解析 id 值
     model_object_ids: dict[str, str] = {}
@@ -431,7 +452,19 @@ def _parse_model_pools(
         const_arrays[name] = items
 
     pool_names = {
-        "premium": ("FREEBUFF_PREMIUM_MODEL_IDS", "FREEBUFF_WEB_PREMIUM_MODEL_IDS"),
+        # 🔴 0.0.79 修正：premium 池**只**解析 FREEBUFF_PREMIUM_MODEL_IDS（桌面端真
+        # premium 池 [luna, solar-pro4]）。旧实现把 FREEBUFF_WEB_PREMIUM_MODEL_IDS
+        # 也并进来，导致：
+        #   - kimi-k3-eco / luna-es（god-only 蜜罐）被误判 premium bucket
+        #   - glm-5.3-flash 被误判 premium（官方 0.0.79 已掉出 → unlimited 通道）
+        #   - muse-spark / glm-5.2 通道语义错位
+        # WEB_PREMIUM = premium ∪ {kimi, luna-es, muse} 是 Web 端可见集合，与
+        # 桌面端并发桶判定无关。session_bucket_for_model 用的是桌面端语义。
+        "premium": ("FREEBUFF_PREMIUM_MODEL_IDS",),
+        # 桌面端 premium 并发桶（0.0.79 = [luna, glm-5.2, solar-pro4]）：
+        # 桌面端并发槽判定（premium 1 / unlimited 3）用它。GitHub main 若未同步
+        # 该常量，集合为空 → session_bucket_for_model 回退 premium_ids。
+        "desktop_bucket": ("FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS",),
         "glm": ("FREEBUFF_GLM_V52_MODEL_IDS",),
         # god-only：官方隐藏评测路由（kimi-k3-eco / luna-es 等），见 DynamicModelTable 注释
         "god_only": ("FREEBUFF_WEB_GOD_ONLY_MODELS",),

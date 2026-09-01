@@ -252,29 +252,52 @@ def is_god_only_model(model: str) -> bool:
 
 def _dynamic_premium_ids() -> frozenset[str] | None:
     """从动态模型注册表读取当前 premium 池（上游 freebuff-models.ts 的
-    FREEBUFF_PREMIUM_MODEL_IDS）。注册表未加载时返回 None（调用方走兜底）。"""
+    FREEBUFF_PREMIUM_MODEL_IDS）。注册表未加载时返回 None（调用方走兜底）。
+
+    🟢 0.0.79 语义澄清：这里返回的 premium_ids **只**是 FREEBUFF_PREMIUM_MODEL_IDS
+    （[luna, solar-pro4]）。桌面端并发桶判定优先走 desktop_bucket_ids
+    （premium ∪ GLM = [luna, glm-5.2, solar-pro4]），见
+    :func:`session_bucket_for_model`。
+    """
     registry = get_model_registry()
     if registry is None or registry.table is None:
         return None
     return frozenset(registry.table.premium_ids)
 
 
+def _dynamic_desktop_bucket_ids() -> frozenset[str] | None:
+    """动态表里的桌面端 premium 并发桶（FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS，
+    = premium ∪ GLM = [luna, glm-5.2, solar-pro4]）。GitHub main 未同步该常量时
+    集合为空 → 视为未提供，调用方回退 premium_ids。"""
+    registry = get_model_registry()
+    if registry is None or registry.table is None:
+        return None
+    ids = registry.table.desktop_bucket_ids
+    if not ids:
+        return None
+    return frozenset(ids)
+
+
 def session_bucket_for_model(model: str) -> str:
     """返回官方 desktop session bucket：``premium`` 或 ``unlimited``。
 
-    判定优先级（2026-08-26 更新）：
-    1. 动态注册表的 premium_ids —— 上游把模型在池间挪动（如 flash 2026-08-18 入
-       premium、2026-08-26 又回退 unlimited）时 N 小时内自动跟随，无需改代码部署；
-    2. 硬编码 UNLIMITED_SESSION_MODEL_IDS 兜底（注册表不可用时）。
+    判定优先级（🟢 2026-09-01 0.0.79 更新）：
+    1. 动态表的 desktop_bucket_ids —— 官方桌面端并发桶（premium ∪ GLM =
+       [luna, glm-5.2, solar-pro4]）在池间挪动时自动跟随，无需改代码部署；
+    2. 动态表 premium_ids（0.0.79 = [luna, solar-pro4]，不含 glm-5.2/glm-5.3-flash）；
+    3. 硬编码 UNLIMITED_SESSION_MODEL_IDS 兜底（注册表不可用时）。
 
-    GLM 池在并发桶语义上仍占 premium 桶（官方 DESKTOP_PREMIUM_BUCKET 是
-    PREMIUM ∪ GLM），但额度上独立 —— 由 is_model_quota_exhausted 单独处理。
+    ⚠️ 旧实现把 FREEBUFF_WEB_PREMIUM_MODEL_IDS 混入 premium_ids，导致
+    glm-5.3-flash / kimi / luna-es / muse 被误判 premium bucket —— 已修复
+    （model_registry._parse_model_pools 只解析 FREEBUFF_PREMIUM_MODEL_IDS）。
     """
     if not model:
         return "premium"
+    bucket_ids = _dynamic_desktop_bucket_ids()
+    if bucket_ids is not None:
+        return "premium" if model in bucket_ids else "unlimited"
     dynamic = _dynamic_premium_ids()
     if dynamic is not None:
-        # 不在动态 premium 集合 → unlimited（官方 STANDARD 表由 !premium 过滤派生）
         return "premium" if model in dynamic else "unlimited"
     if model in UNLIMITED_SESSION_MODEL_IDS:
         return "unlimited"
