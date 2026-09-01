@@ -66,14 +66,16 @@ class OpenAICompatTests(unittest.TestCase):
         model = resolve_model("google/gemini-3.1-flash-lite")
 
         self.assertEqual(model.agent_id, "file-picker")
-        self.assertEqual(model.parent_agent_id, "base2-free-deepseek-flash")
-        self.assertEqual(model.session_id, "deepseek/deepseek-v4-flash")
+        # 🟢 2026-09-01 0.0.79：DEFAULT_MODEL 由 luna 改为 glm-5.3-flash，
+        # 父 agent 跟随 default 变化（GEMINI_FLASH_LITE_SESSION_MODEL_ID 派生）。
+        self.assertEqual(model.parent_agent_id, "base2-free-glm-5-3-flash")
+        self.assertEqual(model.session_id, "z-ai/glm-5.3-flash")
 
     def test_resolve_gemini_flash_preview_uses_program_default_agent(self) -> None:
         model = resolve_model("google/gemini-3.5-flash-lite")
 
         self.assertEqual(model.agent_id, "file-picker-max")
-        self.assertEqual(model.parent_agent_id, "base2-free-deepseek-flash")
+        self.assertEqual(model.parent_agent_id, "base2-free-glm-5-3-flash")
         self.assertEqual(model.upstream_id, "google/gemini-3.5-flash-lite")
 
     def test_agent_validation_payload_defines_spawnable_agents(self) -> None:
@@ -111,6 +113,9 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["model"], "deepseek/deepseek-v4-pro")
         self.assertEqual(payload["provider"], {"data_collection": "deny"})
+        # 🟢 2026-09-01 0.0.79：codebuff_metadata 必含 llm_step_number（反代单
+        # turn 默认 "1"；官方 desktop 必带，缺失会被 detectForeignFreebuffClient
+        # 视为非官方 run 模板）。
         self.assertEqual(
             payload["codebuff_metadata"],
             {
@@ -120,6 +125,7 @@ class OpenAICompatTests(unittest.TestCase):
                 "run_id": "run-1",
                 "client_id": "client-1",
                 "cost_mode": "free",
+                "llm_step_number": "1",
             },
         )
 

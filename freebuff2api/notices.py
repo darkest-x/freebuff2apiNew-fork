@@ -156,6 +156,43 @@ def notice_for_error(error: Exception, model: str = "") -> str | None:
             + "官方会话未激活，可能是额度状态异常或账号受限；"
             + "请稍后重试或切换模型。"
         )
+    # 🟢 2026-09-01 0.0.79 复核（orchestrator.js classifyTurnFailure 131580-131604）：
+    # 桌面端新增两类改写提示：context_overflow（输入超长）和 connection（网络中断）。
+    # 我们的反代用 httpx 也会抛 ECONNRESET / ETIMEDOUT / ENOTFOUND 等，被 _network_error
+    # 包装后落到这里的 describe_error；为了让客户端看到更友好的中文提示，先在
+    # notice_for_error 里识别。
+    if (
+        "context length" in lower
+        or "input length exceeds" in lower
+        or "input length should be" in lower
+        or "context_overflow" in lower
+    ):
+        return (
+            NOTICE_PREFIX
+            + "当前会话上下文超出模型窗口，请开启新对话，"
+            + "或切换到上下文更大的模型（如 deepseek-v4-flash 1M / glm-5.3-flash 1M / luna 1M）。"
+        )
+    if (
+        "connection was interrupted" in lower
+        or "econnreset" in lower
+        or "etimedout" in lower
+        or "enotfound" in lower
+        or "eai_again" in lower
+        or "fetch failed" in lower
+    ):
+        return (
+            NOTICE_PREFIX
+            + "网络连接被中断（ECONNRESET / ETIMEDOUT 等），"
+            + "已保留到此为止的内容，请重新发送消息以继续。"
+        )
+    # 🟢 2026-09-01 0.0.79 复核：桌面端新增 account_changed（同一 tab 启动期间
+    # token 切换），我们只在 token_rotation 触发时才会见到，这里也兜一份。
+    if "account_changed" in lower:
+        return (
+            NOTICE_PREFIX
+            + "上游账号信息发生变化（account_changed），"
+            + "请稍后重试或联系管理员检查 token 配置。"
+        )
     return None
 
 

@@ -423,7 +423,9 @@ def build_anthropic_upstream_payload(
     if tc is not None:
         payload["tool_choice"] = tc
 
-    # Metadata.
+    # Metadata（🟢 2026-09-01 0.0.79 复核，与 openai_compat.build_upstream_payload
+    # 严格对齐 —— 两条入站路径在 codebuff_metadata 上**完全一致**，避免被上游
+    # 视为两个不同客户端）：
     payload["provider"] = {"data_collection": "deny"}
     metadata: dict[str, Any] = {
         "freebuff_instance_id": session.instance_id,
@@ -432,11 +434,10 @@ def build_anthropic_upstream_payload(
         "run_id": run_id,
         "client_id": client_id,
         "cost_mode": "free",
+        "llm_step_number": llm_step_number if llm_step_number is not None else "1",
     }
     if reasoning_effort is not None:
         metadata["freebuff_reasoning_effort"] = reasoning_effort
-    if llm_step_number is not None:
-        metadata["llm_step_number"] = llm_step_number
     payload["codebuff_metadata"] = metadata
     # schema 归一化与 OpenAI 路径一致（官方桌面端风格干净 JSON Schema）
     normalize_tool_schemas(payload)

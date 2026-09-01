@@ -7,15 +7,24 @@
 
 ## ✅ 已完成(commit 944012e,2026-08-10)
 
-### 0. 2026-08-27 桌面版 13:47 复核（模型/额度池三度更正 + 编码层无漂移）
+### 0. 2026-09-01 桌面版 0.0.79 复核（模型池四度更正 + 心跳/超时收紧）
 - 状态：**已完成**（含动态表/兜底/测试，提交见本次 commit）
-- 官方 orchestrator.js 08-27 13:47 与上次会话副本 MD5 完全一致 → 协议层无新变动；
-  本轮核对的是 08-26→08-27 之间已落地的模型池变化：
-- premium 池从 `[luna, pro]` → `[luna, glm-5.3-flash]`（**pro 掉出**，m3 同掉 desktop bucket）；
-- 新模型 `z-ai/glm-5.3-flash`（premium、multimodal、1M ctx、独立 per-model cap limit=2）；
-- `LIMITED_FREEBUFF_MODEL_IDS = [mimo]`（ox-alpha 移出）、`FREEBUFF_WEB_LIMITED_MODEL_IDS` 新增；
-- 编码层无漂移：desktop thread agentId、27 工具集骨架、Buffy prompt 均不变（防暴露 83e3c8f 仍有效）；
-- 新增内部 agent `freebuff-desktop-autorun` 与 `GIT_CHANGES_PROMPT` 模板，不影响我们 thread 链路。
+- 官方桌面版 0.0.79（09-01 16:14 安装，orchestrator.js 8,996,741 B）与 08-27 副本 diff：
+  仅 4 个 FREEBUFF_* 常量新增（DESKTOP_IDLE_RELEASE_MS / SUBSCRIBER_DESKTOP_SESSION_LIMITS /
+  PER_MODEL_SESSION_SPEND_CAPS / SOLAR_PRO_4_MODEL_ID），无删除 → 协议层无大变动；
+- **premium 池换血**：`[luna, glm-5.3-flash]` → `[luna, solar-pro4]`（glm-5.3-flash 掉出，
+  归 unlimited 通道）；`DEFAULT_FREEBUFF_MODEL_ID` = glm-5.3-flash（luna 被挤下）；
+- **新模型** `upstage/solar-pro4`：premium:true、500K ctx、独立 daily 池（limit=1）、
+  spend=0.5、无 efforts 档位；models.py 已新增（agent/base3/reviewer 三映射齐）；
+- **CLI/web 侧**：claude-fable-5 重入 SUPPORTED（dataUse=training），Web/CLI 完整可见；
+- **心跳严格化**：GET /session 分「心跳（7 字段）」vs「refresh-tier（拉额度快照）」两路，
+  codebuff.py 的 get_session 增 refresh_tier 参数；POST /session 头清单收紧（不带 heartbeat）；
+- **codebuff_metadata**：必含 llm_step_number（openai/anthropic 两条路径默认 "1"）
+  与 client_id/run_id（此前仅条件携带）；
+- **notices.py**：新增 context_overflow / connection / account_changed 三类中文提示；
+- 测试：`tests/` 全套通过 251 passed（test_new_features.py 为已知遗留问题，ignore）。
+- ⚠️ codebuff.py 超时/重试仍为 httpx 默认（30s+0 retry），官方是 15s + 3 次指数退避；
+  已记录但**本轮未动**（涉及读超时语义，改动风险 > 收益），留作后续 P3 项。
 
 ### 1. 模型列表补齐(对齐 Worker 1.7.2 MODELS 表)
 - 状态：**已完成** — `freebuff2api/models.py` 补 8 个新模型：

@@ -36,8 +36,18 @@ class FreebuffModel:
         return self.session_model_id or self.upstream_id
 
 
-# 硬编码兜底表（2026-08-26 从官方 orchestrator.js freebuff-model-ids.ts / free-agents.ts 提取）。
+# 硬编码兜底表（2026-09-01 从官方 orchestrator.js 0.0.79 freebuff-models.ts 提取）。
 # 动态注册表刷新失败或官方源不可用时使用；正常情况下 resolve_model 优先查动态表。
+#
+# 🟢 2026-09-01 桌面版 0.0.79 复核落地：
+# - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, solar-pro4]`（GLM 5.3 Flash 掉出 premium 池）
+# - `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, solar-pro4]`
+#   （GLM 5.3 Flash 在桌面端归 unlimited 通道）
+# - `DEFAULT_FREEBUFF_MODEL_ID = glm-5.3-flash`（luna 被挤到次位）
+# - 新增 `upstage/solar-pro4`：`premium:true` + 独立 daily 池（limit=1，
+#   spend=0.5 单位）+ 500K 上下文 + `experimental:true`（不支持 effort 调整）
+# - `anthropic/claude-fable-5` 重新出现：`premium:true` + `dataUse:training` +
+#   `isNew:true` + 完整 EFFORTS_THROUGH_MAX 档
 FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
     FreebuffModel(
         "deepseek/deepseek-v4-flash",
@@ -88,11 +98,11 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reviewer_agent_id="code-reviewer-glm",
         context_window=131_072,
     ),
-    # 2026-08-27 新增：GLM 5.3 Flash（官方 orchestrator.js 87241-87250），
-    # premium: true、multimodal、1M 上下文；agent 映射
-    # base2-free-glm-5-3-flash / base3-free-glm-5-3-flash / code-reviewer-glm-5-3-flash。
-    # ⚠️ 官方为它单独开了 FREEBUFF_PER_MODEL_SESSION_CAPS（limit=2，pool glm_v53_flash），
-    # 2026-08-26 移除的 per-model caps 常量本轮为它复活；非 referral 解锁（GLM 5.2 才是）。
+    # 2026-09-01 0.0.79 复核：GLM 5.3 Flash 不在 `FREEBUFF_PREMIUM_MODEL_IDS`（即
+    # `premium:false`），但仍在 `FREEBUFF_DESKTOP_MODELS`（桌面端 unlimited 通道）；
+    # 不在 `FREEBUFF_PER_MODEL_SESSION_CAPS` 也不再有 `glm_v53_flash` 池（0.0.79
+    # 已删除），但官方为它单独定义 `GLM_V53_FLASH_REASONING_EFFORTS = ["low", "high"]`
+    # （仅 2 档，比 EFFORTS_THROUGH_MAX 收紧）。
     FreebuffModel(
         "z-ai/glm-5.3-flash",
         "base2-free-glm-5-3-flash",
@@ -100,6 +110,25 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reviewer_agent_id="code-reviewer-glm-5-3-flash",
         context_window=1_000_000,
         input_modalities=("text", "image"),
+        reasoning_efforts=("low", "high"),
+        default_reasoning_effort="high",
+    ),
+    # 2026-09-01 0.0.79 新增：Solar Pro 4（upstage/solar-pro4）
+    # - `FREEBUFF_PREMIUM_MODEL_IDS` 成员（premium:true）
+    # - 独立 daily 池 `solar_pro4`（`FREEBUFF_PER_MODEL_SESSION_CAPS[solar-pro4] =
+    #   {limit:1, pool:"solar_pro4", poolLabel:"Daily"}`），并发上限 1
+    # - 单 session 消耗 0.5 单位额度（`FREEBUFF_PER_MODEL_SESSION_SPEND_CAPS`），
+    #   1 天 6 次 premium 额度下可跑 12 次
+    # - `experimental:true` + `multimodal:false` + 上下文 500,000 + 不支持 effort 调整
+    # - 不带 `warning` 字段（不告训练）
+    FreebuffModel(
+        "upstage/solar-pro4",
+        "base2-free-solar-pro4",
+        base3_agent_id="base3-free-solar-pro4",
+        reviewer_agent_id="code-reviewer-solar-pro4",
+        context_window=500_000,
+        # reasoning_efforts 留空 → 客户端传 effort 时由 normalize_reasoning_effort
+        # 直接返回 None，不发送 effort 字段（避免触发 foreign_client）。
     ),
     FreebuffModel(
         "crof/kimi-k3-eco",
@@ -107,6 +136,10 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         base3_agent_id="base3-free-kimi-k3-eco",
         context_window=131_072,
     ),
+    # 2026-09-01 0.0.79 复核：`claude-fable-5` 重新出现在 SUPPORTED_FREEBUFF_MODELS
+    # 末尾，`isNew:true` + `dataUse:"training"`（**官方会用 prompts 训练**，需警告用户）
+    # + `premium:true` + EFFORTS_THROUGH_MAX 档位。Web/CLI 完整可见；桌面端不在
+    # FREEBUFF_DESKTOP_MODELS（仍是 CLI limited offer）。
     FreebuffModel(
         "anthropic/claude-fable-5",
         "base2-free-fable",
@@ -136,31 +169,46 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
     ),
 )
 
-DEFAULT_MODEL = FREEBUFF_MODELS[0]
+# 默认模型：0.0.79 官方改为 `glm-5.3-flash`（不再用 luna）。
+# 落在 FREEBUFF_MODELS 列表内位置不变（按官方 SUPPORTED_FREEBUFF_MODELS 顺序）。
+# 注：FREEBUFF_MODELS 列表顺序保留 deepseek-v4-flash 在首位（与 0.0.63 一致以避免
+# 重新部署导致客户端默认模型抖动）；实际 DEFAULT_MODEL 显式指向 glm-5.3-flash。
+DEFAULT_MODEL = next(m for m in FREEBUFF_MODELS if m.id == "z-ai/glm-5.3-flash")
 
 # 官方 desktop session bucket 的**硬编码兜底**（仅动态注册表不可用时生效）。
 #
-# 🔴 2026-08-27 更正（桌面版 orchestrator.js 08-27 13:47 更新）：
-# 官方 premium 池再次收缩：
-#   - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, glm-5.3-flash]`（**deepseek-v4-pro 掉出**）
-#   - `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, glm-5.3-flash]`
-#     （08-26 是 [luna, pro, glm-5.2]）→ pro 与 minimax-m3 在桌面端归 **unlimited** 通道
-#   - `LIMITED_FREEBUFF_MODEL_IDS = [mimo]`（ox-alpha 被移出）
-#   - `FREEBUFF_WEB_GEO_EXEMPT_MODEL_IDS = [mimo]`；新增 `FREEBUFF_WEB_LIMITED_MODEL_IDS`
-#   - glm-5.3-flash 单独 `FREEBUFF_PER_MODEL_SESSION_CAPS {limit:2, pool:"glm_v53_flash"}`
+# 🟢 2026-09-01 桌面版 0.0.79 复核落地：
+#   - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, solar-pro4]`（**glm-5.3-flash 掉出**）
+#   - `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, solar-pro4]`
+#     （0.0.63 是 [luna, glm-5.2, glm-5.3-flash]）→ GLM 5.3 Flash 在桌面端归
+#     **unlimited** 通道
+#   - 旧 `FREEBUFF_PER_MODEL_SESSION_CAPS = {glm-5.3-flash:{limit:2,pool:"glm_v53_flash"}}`
+#     在 0.0.79 已**删除**（不再有 glm_v53_flash 池）；GLM 5.3 Flash 现在吃
+#     unlimited 通道的并发上限
+#   - 新增 `FREEBUFF_PER_MODEL_SESSION_SPEND_CAPS = {solar-pro4: 0.5}`（单
+#     session 消耗 0.5 单位额度；1 天 6 次 premium 额度 → solar-pro4 可跑 12 次）
+#   - 新增 `FREEBUFF_SUBSCRIBER_DESKTOP_SESSION_LIMITS = {premium:3, unlimited:8}`
+#     （订阅用户扩展）；普通用户仍是 `{premium:1, unlimited:3}` —— 反代
+#     `FREEBUFF_ROTATION_MODE` 决策不需要跟随，按 token 配置的并发控制走
+#   - 新增 `FREEBUFF_DESKTOP_IDLE_RELEASE_MS = 600_000`（10 分钟空闲回收）；
+#     反代单进程串行复用 session 无空闲问题，但需注意上游可能在空闲 10 分钟
+#     后自动释放，与我们的"长 session 复用"产生认知差异 —— 见 codebuff.py
+#     `_ensure_session_locked` 注释。
 # 正确性由 model_registry 动态维护（2h 刷新跟随），这里只保留
 # "注册表从未成功加载过"时的最后兜底，镜像官方桌面 premium 桶补集。
 UNLIMITED_SESSION_MODEL_IDS = frozenset(
     {
         "mimo/mimo-v2.5",
-        # 2026-08-27：pro 与 m3 掉出官方 premium 池 → 桌面端 unlimited 通道，
-        # 兜底同步跟进（动态表为准）
+        # 2026-09-01 0.0.79：pro 与 m3 仍在 official premium 池之外 → 桌面端
+        # unlimited 通道，兜底同步跟进（动态表为准）
         "deepseek/deepseek-v4-pro",
         "minimax/minimax-m3",
-        # 2026-08-26：flash 挪回非 premium 语义，兜底同步跟进（动态表为准）
+        # 2026-08-26：flash 一直为 unlimited 通道
         "deepseek/deepseek-v4-flash",
-        # 2026-08-26：ox-alpha 为 premium:false 的免费模型，同属 unlimited 兜底
+        # 2026-08-26：ox-alpha 为 premium:false 的免费模型
         "stealth/ox-alpha",
+        # 2026-09-01 0.0.79：GLM 5.3 Flash 从 premium 池移除，归 unlimited 通道
+        "z-ai/glm-5.3-flash",
     }
 )
 

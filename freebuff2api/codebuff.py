@@ -330,6 +330,7 @@ class CodebuffClient:
         instance_id: str | None = None,
         *,
         include_rate_limits: bool = False,  # 已废弃：任何路径都不再发送（见下）
+        refresh_tier: bool = False,  # 🟢 2026-09-01 0.0.79：true 时走"额度全量刷新"路径
     ) -> dict[str, Any]:
         """查询当前 session 状态。
 
@@ -339,12 +340,36 @@ class CodebuffClient:
         代理的证据（netroindonesia 案例）。保留形参仅为兼容旧调用方，发了也会
         被忽略。
 
-        抓包（会话 123）：响应是最小 body 还是完整 body，由这个头决定。
-        - 官方心跳（seq 20）不带该头 → 响应只有 status/accessTier/instanceId/
-          model/admittedAt/expiresAt/remainingMs 七个字段
-        - 额度快照从 POST /session 的 admission 响应取（seq 19 实证自带
-          rateLimitsByModel + desktopSessionCounts），无需额外 GET 拉取。
+        🟢 2026-09-01 0.0.79 桌面版抓包（orchestrator.js 87595-87620 / 125163）发现
+        两种 GET 请求共存，必须严格区分，否则请求头组合会触风控：
+
+        - **心跳**（heartbeat）路径：``GET /session`` + ``x-freebuff-heartbeat:1``
+          + ``x-freebuff-instance-id`` + ``x-freebuff-multi-session:1``；响应是
+          最小 7 字段（``status/accessTier/instanceId/model/admittedAt/expiresAt/
+          remainingMs``），超时 ``SESSION_HEARTBEAT_TIMEOUT_MS = 10000``。
+          官方 `SessionManager.beatableThreads()` 走这条路径防 30 min grace 回收。
+        - **额度全量刷新**（refresh_tier）路径：``GET /session`` +
+          ``x-freebuff-multi-session:1`` + ``x-freebuff-include-unused-rate-limits:1``
+          （**带 include-unused**，但**不带 heartbeat 与 instance-id**）；
+          响应是完整 ``rateLimitsByModel + desktopSessionCounts``。
+          官方 `SessionManager.refreshTier()` 走这条路径拉额度快照。
+
+        ⚠️ 关键反指纹点（2026-08-19 baseline）：混用这两个头 = 既不是心跳也
+        不是 refresh tier = 上游 detectForeignFreebuffClient 会标"第三方代理"
+        并降级。本方法把这两个路径显式分开，由调用方按场景选择。
         """
+        if refresh_tier:
+            # 额度全量刷新：带 include-unused，不带 heartbeat 与 instance-id
+            extra = {
+                "x-freebuff-multi-session": "1",
+                "x-freebuff-include-unused-rate-limits": "1",
+            }
+            return await self._json(
+                "GET",
+                "/api/v1/freebuff/session",
+                headers=self._headers(extra=extra),
+            )
+        # 心跳 / 通用查询：带 multi-session + 可选 instance-id；不带 include-unused
         extra = {"x-freebuff-multi-session": "1"}
         if instance_id:
             extra["x-freebuff-instance-id"] = instance_id
@@ -359,6 +384,15 @@ class CodebuffClient:
         # 桌面版签名（对齐 Worker 1.7.0）：客户端预生成 instance-id，服务端据此绑定会话，
         # 避免旧版"服务端分配实例"特征被 detectForeignFreebuffClient 标记。
         instance_id = str(uuid.uuid4())
+        # 🟢 2026-09-01 0.0.79 复核：POST /session 头严格按 orchestrator.js 125469-125475：
+        #   authorization
+        #   x-freebuff-model
+        #   x-freebuff-instance-id
+        #   x-freebuff-multi-session: 1
+        #   [可选] x-freebuff-takeover-instance-id: <id>（抢占时才有）
+        # **不带** x-freebuff-heartbeat（那是 GET 心跳路径才有）
+        # **不带** x-freebuff-include-unused-rate-limits（那是 GET refresh-tier 路径）
+        # **不带** x-freebuff-acting-user-id（chat 路径才有，且 UUID 来源尚未确认）
         headers = self._headers(
             extra={
                 "x-freebuff-model": model,
@@ -496,10 +530,20 @@ class CodebuffClient:
         logger.info("deleted active freebuff session")
 
     async def heartbeat(self, instance_id: str) -> None:
-        """发送心跳保活（对齐官方桌面端 45 秒心跳）。
+        """发送心跳保活（对齐官方桌面端 45 秒心跳 + 0.0.79 严格头集合）。
 
         官方 FREEBUFF_SESSION_HEARTBEAT_INTERVAL_MS = 45000。
         不心跳的话服务器可能提前回收 session，导致长任务被中断。
+
+        🟢 2026-09-01 0.0.79 复核：心跳请求必须**只**带 3 个头（orchestrator.js 125411）：
+            - x-freebuff-multi-session: 1
+            - x-freebuff-instance-id: <instance_id>
+            - x-freebuff-heartbeat: 1
+        **禁止**带 ``x-freebuff-include-unused-rate-limits``（那是 refresh_tier 路径），
+        也**禁止**带 ``x-freebuff-acting-user-id``（chat 路径才有）。
+        混用 = 上游 detectForeignFreebuffClient 标"第三方代理" → 降级或封号。
+        请求超时 ``SESSION_HEARTBEAT_TIMEOUT_MS = 10000``（对齐官方）。
+        响应只取 7 个字段，官方故意不读 body 直接 cancel（acquire_stream 行为）。
         """
         try:
             response = await (await self._ensure_client()).get(
@@ -511,9 +555,10 @@ class CodebuffClient:
                         "x-freebuff-heartbeat": "1",
                     }
                 ),
-                timeout=httpx.Timeout(10.0),
+                timeout=httpx.Timeout(10.0),  # 对齐官方 SESSION_HEARTBEAT_TIMEOUT_MS = 10000
             )
-            # 官方只发请求不读 body，直接 cancel
+            # 官方只发请求不读 body，直接 cancel（acquire_stream 行为）。
+            # 不读 body 也避免了"心跳响应里 rateLimitsByModel 变化"引起的状态漂移。
             await response.aclose()
         except Exception:
             pass
@@ -927,6 +972,11 @@ class SessionManager:
         # 用最近一次 admission 快照（POST /session 响应自带 rateLimitsByModel）
         # 本地判断：无快照或快照里没有 glm 条目 = 无法证明有权益 → fail-fast
         # 绝不触碰上游。首次请求（尚无任何快照）同样拒绝：宁可误拒也不赌封号。
+        #
+        # 🟢 2026-09-01 0.0.79 复核：仍然只有 glm-5.2 是 referral 解锁（GLM_POOL
+        # 仍只含 glm-5.2）；glm-5.3-flash 不在 GLM_POOL（它是 unlimited 通道），
+        # 但仍是 premium 模型——客户端如果没用过 glm-5.2 的 referral 权益，碰
+        # glm-5.3-flash 不会封号（unlimited 通道不限 referral），可以正常路由。
         if model in GLM_POOL_MODEL_IDS:
             snapshot = getattr(self.client, "last_rate_limits", None)
             if not isinstance(snapshot, dict) or "z-ai/glm-5.2" not in snapshot:
@@ -937,6 +987,12 @@ class SessionManager:
                     "ban, so the request was rejected locally. Please switch models.",
                     403,
                 )
+        # 🟢 2026-09-01 0.0.79：Solar Pro 4 是独立 daily 池（limit=1）。
+        # 反代单进程串行复用 session：每个请求都会拿同一个 instance_id 的会话；
+        # 如果 solar-pro4 池已满，上游会 429 / status:"model_unavailable"，
+        # 这种情况下 rotate 到下一个账号没意义（池是账号级而非全局共享）——
+        # 直接透传友好提示给客户端即可。这里只标记不轮换，避免把多账号的
+        # solar-pro4 池消耗互相踩坑。
         cached = self._sessions.get(model)
         if cached and cached.is_fresh:
             try:

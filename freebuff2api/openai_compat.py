@@ -14,10 +14,31 @@ logger = logging.getLogger("freebuff2api.openai_compat")
 from .models import normalize_reasoning_effort, resolve_model
 
 
-# 官方 free-mode marker（0.0.63 桌面版抓包确认）：system 必须以官方 Buffy 编码 agent
+# 官方 free-mode marker（0.0.79 桌面版抓包确认）：system 必须以官方 Buffy 编码 agent
 # 开头，否则服务端 hasFreebuffRootSystemPromptOpening 字节级校验失败（403
-# free_mode_cli_required）。这里只注入官方开头段落 + 当前日期，不再使用旧 Worker 的
-# strategic coding assistant 极简前缀（已与 0.0.63 桌面版不一致）。
+# free_mode_cli_required）。这里只注入官方开头段落 + 当前日期，与 0.0.79 桌面版
+# orchestrator.js 125833 createBase3().systemPrompt 严格对齐：
+#
+#   "You are Buffy, the coding agent behind Codebuff. You help users with
+#    software engineering tasks: fixing bugs, adding functionality, refactoring,
+#    and explaining code.\n\n
+#    Current date: ${PLACEHOLDER2.CURRENT_DATE}.\n\n
+#    - Match the project's existing conventions. ...\n
+#    - Prefer editing existing files ...\n
+#    - Verify non-trivial changes ...\n
+#    - Use write_todos to plan and track multi-step tasks.\n
+#    - Your responses are displayed in a terminal. Keep them short and concise.\n
+#    - Don't run destructive or hard-to-undo commands ...\n\n
+#    ${PLACEHOLDER2.KNOWLEDGE_FILES_CONTENTS}\n\n
+#    ${PLACEHOLDER2.GIT_CHANGES_PROMPT}\n"
+#
+# 我们没有 KNOWLEDGE_FILES_CONTENTS / GIT_CHANGES_PROMPT 的真实渲染上下文（官方
+# 桌面端由 thread-agent 通过 `${...}` 占位符在运行时注入），但 `${GIT_CHANGES_PROMPT}`
+# 在 0.0.79 桌面版是**可选**段落（官方把它放在 KNOWLEDGE_FILES 之后），无
+# 环境上下文时整段被替换为空字符串（free-mode 下场景外的内容**不强制**）。所以这里
+# 用空段落近似即可，**不会**破坏上游的字节级校验（free_mode_cli_required 是字节级
+# prefix 校验，不验全文）。曾出现过的 strategic coding assistant 极简前缀（已与
+# 0.0.63 桌面版不一致）已彻底弃用。
 def _buffy_system_prompt() -> str:
     today = date.today().strftime("%B %d, %Y")
     return (
@@ -325,6 +346,21 @@ def build_upstream_payload(
     clamp_output_tokens(payload, body.get("model"))
 
     payload["provider"] = {"data_collection": "deny"}
+    # 🟢 2026-09-01 0.0.79 复核（orchestrator.js 126320-126323 / 89587）：
+    # 官方 chat body 的 codebuff_metadata **必含**字段：
+    #   - freebuff_instance_id      ← 必填（来自 session.instance_id）
+    #   - freebuff_multi_session    ← 必填（固定 "1"）
+    #   - run_id                    ← 必填（agent run 启动后才有）
+    #   - client_id                 ← 必填（官方 generateRandomUUID 或 session id）
+    #   - cost_mode                 ← 必填（"free"）
+    #   - llm_step_number           ← 必填（runAgentStep 内 String(llmStepNumber)，
+    #                                     每 run 递增；反代目前未启用多 step，简化为 "1"）
+    # 可选字段：
+    #   - freebuff_reasoning_effort ← 仅 turn.effort 有值时填
+    #   - n                         ← 多响应数
+    #   - cache_debug_correlation   ← 调试用
+    # 缺失 run_id / client_id / llm_step_number 中任意一个都是上游能识别的指纹
+    # （参见 AGENTS.md 2026-08-19 反指纹基线）。
     metadata: dict[str, Any] = {
         "freebuff_instance_id": session.instance_id,
         "freebuff_multi_session": "1",
@@ -332,11 +368,13 @@ def build_upstream_payload(
         "run_id": run_id,
         "client_id": client_id,
         "cost_mode": "free",
+        # 反代单 turn 默认是 1 step（与官方 desktop 默认对齐；多 step 由 RunManager
+        # 调度但目前尚未启用，留 default 即可）。缺失此字段会被 detectForeignFreebuffClient
+        # 视为非官方 run 模板。
+        "llm_step_number": llm_step_number if llm_step_number is not None else "1",
     }
     if reasoning_effort is not None:
         metadata["freebuff_reasoning_effort"] = reasoning_effort
-    if llm_step_number is not None:
-        metadata["llm_step_number"] = llm_step_number
     payload["codebuff_metadata"] = metadata
     # [B2 待验证] 最后统一重排键序（详见 order_upstream_payload 注释）。
     return order_upstream_payload(payload)

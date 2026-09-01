@@ -221,9 +221,11 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.run_id, "run-1")
         self.assertEqual(run.chat_run_id, "run-2")
         self.assertEqual(run.payload_run_id, "run-2")
+        # 🟢 2026-09-01 0.0.79：DEFAULT_MODEL 由 deepseek-v4-flash 改为
+        # glm-5.3-flash，Gemini 子代理的父 agent 跟随 default 变化。
         self.assertEqual(
             client.calls[0],
-            ("start", "base2-free-deepseek-flash", [], "run-1"),
+            ("start", "base2-free-glm-5-3-flash", [], "run-1"),
         )
         self.assertEqual(
             client.calls[1],
