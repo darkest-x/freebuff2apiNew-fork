@@ -1,5 +1,5 @@
 {
-  "fetched_at": 1788270035.3184476,
+  "fetched_at": 1788349049.412618,
   "models": [
     {
       "id": "mimo/mimo-v2.5",
@@ -89,12 +89,9 @@
     "Nothing is metered and\n  // multi-tab today",
     "a\n  // bill we would not want to underwrite at three at once",
     "openai/gpt-5.6-luna",
-    "upstage/solar-pro4",
-    "z-ai/glm-5.2"
+    "upstage/solar-pro4"
   ],
-  "glm_ids": [
-    "z-ai/glm-5.2"
-  ],
+  "glm_ids": [],
   "god_only_ids": [
     "crof/kimi-k3-eco",
     "openai/gpt-5.6-luna-es"

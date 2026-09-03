@@ -313,14 +313,21 @@ def _handle_upstream_error(request: Request, account_index: int | None, error: E
     # 428 waiting_room_required：缓存 session 已失效（僵尸实例，上游 chat gate 不识别）。
     # 清除该账号/模型的 session 缓存让下次请求重建，且不记入 failure/rotation，
     # 避免账号被误判失效（对齐 Worker 1.7.0 stale-session 处理）。
-    if error.status_code == 428:
+    #
+    # 🟢 2026-09-02 0.0.86 复核：长任务跑到一半被官方 free session 回收（`session_ended`
+    # status code 折叠自 `waiting_room_required` / `session_expired` / `session_superseded`
+    # / `session_model_mismatch`，4 个 GATE_CODE 都带 `endsTheSession: !0`），会落到
+    # 409/410/428 任意一个。原先只清 428，现扩展为：只要是 ends-the-session 的码，
+    # 都把缓存清掉，让下次请求重建。
+    if error.status_code in (409, 410, 428):
         try:
             account = accounts._accounts[account_index]
             account.sessions.discard_session(model)
         except Exception:
             pass
         logger.warning(
-            "session stale (428 waiting_room_required) account=%s model=%s; cache cleared",
+            "session stale (%d) account=%s model=%s; cache cleared",
+            error.status_code,
             account_index + 1,
             model,
         )
@@ -752,8 +759,12 @@ async def _stream_openai_chunks(
                         "empty stream" in str(error)
                         or "session expired" in str(error)
                         or "session ended" in str(error)
-                        or error.status_code == 410
-                        or error.status_code == 428
+                        or "session_ended" in str(error)
+                        or "free session ran out" in str(error)
+                        or "free session ended" in str(error)
+                        or "session_superseded" in str(error)
+                        or "session_model_mismatch" in str(error)
+                        or error.status_code in (410, 428)
                     )
                 ):
                     retried = True
@@ -921,8 +932,12 @@ async def _collect_completion(
                         "empty stream" in str(error)
                         or "session expired" in str(error)
                         or "session ended" in str(error)
-                        or error.status_code == 410
-                        or error.status_code == 428
+                        or "session_ended" in str(error)
+                        or "free session ran out" in str(error)
+                        or "free session ended" in str(error)
+                        or "session_superseded" in str(error)
+                        or "session_model_mismatch" in str(error)
+                        or error.status_code in (410, 428)
                     )
                 ):
                     retried = True
@@ -1574,8 +1589,12 @@ async def _stream_anthropic_events(
                         "empty stream" in str(error)
                         or "session expired" in str(error)
                         or "session ended" in str(error)
-                        or error.status_code == 410
-                        or error.status_code == 428
+                        or "session_ended" in str(error)
+                        or "free session ran out" in str(error)
+                        or "free session ended" in str(error)
+                        or "session_superseded" in str(error)
+                        or "session_model_mismatch" in str(error)
+                        or error.status_code in (410, 428)
                     )
                 ):
                     retried = True
@@ -1715,8 +1734,12 @@ async def _collect_anthropic_message(
                         "empty stream" in str(error)
                         or "session expired" in str(error)
                         or "session ended" in str(error)
-                        or error.status_code == 410
-                        or error.status_code == 428
+                        or "session_ended" in str(error)
+                        or "free session ran out" in str(error)
+                        or "free session ended" in str(error)
+                        or "session_superseded" in str(error)
+                        or "session_model_mismatch" in str(error)
+                        or error.status_code in (410, 428)
                     )
                 ):
                     retried = True

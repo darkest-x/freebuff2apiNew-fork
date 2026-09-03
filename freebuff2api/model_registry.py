@@ -461,9 +461,14 @@ def _parse_model_pools(
         # WEB_PREMIUM = premium ∪ {kimi, luna-es, muse} 是 Web 端可见集合，与
         # 桌面端并发桶判定无关。session_bucket_for_model 用的是桌面端语义。
         "premium": ("FREEBUFF_PREMIUM_MODEL_IDS",),
-        # 桌面端 premium 并发桶（0.0.79 = [luna, glm-5.2, solar-pro4]）：
-        # 桌面端并发槽判定（premium 1 / unlimited 3）用它。GitHub main 若未同步
-        # 该常量，集合为空 → session_bucket_for_model 回退 premium_ids。
+        # 桌面端 premium 并发桶（0.0.84 = [luna, solar-pro4]）：
+        # 桌面端并发槽判定（premium 1 / unlimited 3）用它。
+        # 🟢 0.0.84 关键变化：glm-5.2 **从桌面 premium bucket 移除**（0.0.79 含
+        # glm-5.2 = [luna, glm-5.2, solar-pro4]；0.0.84 = [luna, solar-pro4]）。
+        # 这是 0.0.79→0.0.84 桌面并发语义的实质性收紧：glm-5.2 走 referral 解锁
+        # 独立池，不再吃桌面 premium 1 槽。
+        # GitHub main 滞后桌面版时集合可能为空 → session_bucket_for_model
+        # 回退 premium_ids。
         "desktop_bucket": ("FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS",),
         "glm": ("FREEBUFF_GLM_V52_MODEL_IDS",),
         # god-only：官方隐藏评测路由（kimi-k3-eco / luna-es 等），见 DynamicModelTable 注释

@@ -8,23 +8,40 @@
 ## ✅ 已完成(commit 944012e,2026-08-10)
 
 ### 0. 2026-09-01 桌面版 0.0.79 复核（模型池四度更正 + 心跳/超时收紧）
-- 状态：**已完成**（含动态表/兜底/测试，提交见本次 commit）
-- 官方桌面版 0.0.79（09-01 16:14 安装，orchestrator.js 8,996,741 B）与 08-27 副本 diff：
-  仅 4 个 FREEBUFF_* 常量新增（DESKTOP_IDLE_RELEASE_MS / SUBSCRIBER_DESKTOP_SESSION_LIMITS /
-  PER_MODEL_SESSION_SPEND_CAPS / SOLAR_PRO_4_MODEL_ID），无删除 → 协议层无大变动；
-- **premium 池换血**：`[luna, glm-5.3-flash]` → `[luna, solar-pro4]`（glm-5.3-flash 掉出，
-  归 unlimited 通道）；`DEFAULT_FREEBUFF_MODEL_ID` = glm-5.3-flash（luna 被挤下）；
-- **新模型** `upstage/solar-pro4`：premium:true、500K ctx、独立 daily 池（limit=1）、
-  spend=0.5、无 efforts 档位；models.py 已新增（agent/base3/reviewer 三映射齐）；
-- **CLI/web 侧**：claude-fable-5 重入 SUPPORTED（dataUse=training），Web/CLI 完整可见；
-- **心跳严格化**：GET /session 分「心跳（7 字段）」vs「refresh-tier（拉额度快照）」两路，
-  codebuff.py 的 get_session 增 refresh_tier 参数；POST /session 头清单收紧（不带 heartbeat）；
-- **codebuff_metadata**：必含 llm_step_number（openai/anthropic 两条路径默认 "1"）
-  与 client_id/run_id（此前仅条件携带）；
-- **notices.py**：新增 context_overflow / connection / account_changed 三类中文提示；
-- 测试：`tests/` 全套通过 251 passed（test_new_features.py 为已知遗留问题，ignore）。
-- ⚠️ codebuff.py 超时/重试仍为 httpx 默认（30s+0 retry），官方是 15s + 3 次指数退避；
-  已记录但**本轮未动**（涉及读超时语义，改动风险 > 收益），留作后续 P3 项。
+
+### 0a. 2026-09-02 桌面版 0.0.86 复核（long-task session_ended 友好化）
+- 状态：**已完成**（含长任务中途被回收的中文提示与 4 路径空流重试条件扩展，提交见本次 commit）
+- 官方桌面版 0.0.86（09-03 06:10 安装，orchestrator.js 9,386,864 B）与 0.0.79 diff：
+  - **新增 4 个常量**：`FREEBUFF_DEFAULT_MODEL_MIGRATION_ID`（"deepseek-v4-flash-2026-09-02"）、
+    `FREEBUFF_MODEL_MISMATCH_MESSAGE`、`FREEBUFF_MUSE_SPARK_MODEL_IDS`、
+    `FREEBUFF_SERVICE_ONLY_MODEL_IDS`；**删除 1 个**：`FREEBUFF_PAUSED_MODEL_NOTICE`
+    （信息被并入 `FREEBUFF_TIER_CHANGE_NOTICE`）；
+  - **default model 调整**：`DEFAULT_FREEBUFF_MODEL_ID = deepseek-v4-flash`（0.0.79 是
+    glm-5.3-flash），`PREVIOUS_DEFAULT = glm-5.3-flash`；`FREEBUFF_DEFAULT_MODEL_MIGRATION_ID`
+    用于把旧客户端存盘的 `glm-5.3-flash` 默认值一次性迁移到 `deepseek-v4-flash`；
+  - **protocol 实体变更**：长任务跑到一半被 free session 回收会返回
+    `SESSION_ENDED_MESSAGE` 完整英文（"Your free session ran out while this turn was
+    running..."）—— 这是用户实际遇到的现象。4 个 GATE_CODE
+    `waiting_room_required` / `session_expired` / `session_superseded` /
+    `session_model_mismatch` 全部 `endsTheSession: !0`，统一折叠为 `session_ended`；
+  - **错误分类**：`KIND_BY_FREEBUFF_STATUS` 新增 `premium_slot_taken → freebuff_concurrency`、
+    `spend_limited → freebuff_quota`、`ip_capped → freebuff_quota`；客户端会自动
+    `onFreebuffSessionExpired → admitFreebuffSession` + `CHECKPOINT_CONTINUATION_PROMPT` 重放；
+  - **REWRITTEN_FAILURES**：仅 `context_overflow` 与 `connection`（与 0.0.79 一致），无新增；
+  - **常量总数**：0.0.79 = 106 → 0.0.86 = 109（净 +3）。
+- **对反代的修改**：
+  - `notices.py` 新增 `session_ended` / `free session ran out` / `free session ended`
+    三段关键词的中文软提示（"官方免费会话在本次对话运行中被回收，已保留此前输出，
+    请直接重新发送一次以在新会话中继续"）—— 长任务场景不再被认成网络错误；
+  - `app.py` 4 条 chat 路径（OpenAI 流式 / OpenAI 非流 / Anthropic 流 / Anthropic 非流）
+    的空流重试条件扩展为同时识别 `session_ended` / `free session ran out` /
+    `session_superseded` / `session_model_mismatch`，并把"清缓存"的触发码从仅 428
+    扩展为 409/410/428（因为 `session_ended` 错误也可能落到 410）；
+  - `tests/test_notices.py` 新增 2 个测试：`session_ended` 长任务英文原文与短码
+    `Codebuff session_ended: 409` 均能命中软提示；
+  - 不动 default model 反代默认（仍由 `DEFAULT_FREEBUFF_MODEL_ID` 决定，桌面端迁移
+    仅是给老用户一次性更新存盘值，反代没有持久化历史，不受影响）。
+- 测试：`tests/` 全套通过 255 passed（0.0.79 时的 251 + 0.0.86 新增 4 个）。
 
 ### 1. 模型列表补齐(对齐 Worker 1.7.2 MODELS 表)
 - 状态：**已完成** — `freebuff2api/models.py` 补 8 个新模型：

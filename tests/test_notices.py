@@ -56,6 +56,29 @@ class NoticeMappingTests(unittest.TestCase):
         text = describe_error(CodebuffError("network error", 502))
         self.assertIn("网络", text)
 
+    def test_session_ended_long_task_maps_to_soft_notice(self) -> None:
+        # 🟢 2026-09-02 0.0.86 复核：官方 SESSION_ENDED_MESSAGE 134679，含义是
+        # 长任务跑到一半 free session 被回收。客户端应看到"重新发送一次"的指引，
+        # 而非被认成网络错误或硬错误。
+        msg = (
+            "Your free session ran out while this turn was running. "
+            "Nothing is lost — send your message again to start a new session "
+            "and pick up where it left off."
+        )
+        notice = notice_for_error(CodebuffError(msg, 0))
+        self.assertIsNotNone(notice)
+        assert notice is not None
+        self.assertIn("中转提示", notice)
+        self.assertIn("重新发送", notice)
+
+    def test_session_ended_short_code_maps_to_soft_notice(self) -> None:
+        # 长任务场景不一定带整段英文信息，也可能是 code-only（如
+        # `Codebuff session_ended: 409`）—— 也得能命中。
+        notice = notice_for_error(CodebuffError("Codebuff session_ended: 409", 409))
+        self.assertIsNotNone(notice)
+        assert notice is not None
+        self.assertIn("会话在本次对话运行中被回收", notice)
+
 
 if __name__ == "__main__":
     unittest.main()

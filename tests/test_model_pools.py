@@ -34,13 +34,26 @@ from freebuff2api.models import (
 )
 
 
-def _registry_with(premium_ids: set[str]) -> ModelRegistry:
-    """构造带动态表的注册表桩（不触发网络）。"""
+def _registry_with(
+    premium_ids: set[str],
+    *,
+    desktop_bucket_ids: set[str] | None = None,
+    glm_ids: set[str] | None = None,
+) -> ModelRegistry:
+    """构造带动态表的注册表桩（不触发网络）。
+
+    🟢 0.0.84：默认 desktop_bucket_ids = premium_ids ∪ {"z-ai/glm-5.2"}（模拟
+    0.0.79 行为以便现存测试通过）。要测 0.0.84 真实语义必须显式传
+    desktop_bucket_ids={luna, solar-pro4}（glm-5.2 **从 bucket 移除**）。
+    """
     registry = ModelRegistry()
+    if desktop_bucket_ids is None:
+        desktop_bucket_ids = set(premium_ids) | {"z-ai/glm-5.2"}
     registry._table = DynamicModelTable(
         models=[DynamicModelEntry(id=m, agent_id="a") for m in premium_ids],
         premium_ids=premium_ids,
-        glm_ids={"z-ai/glm-5.2"},
+        desktop_bucket_ids=desktop_bucket_ids,
+        glm_ids=glm_ids or {"z-ai/glm-5.2"},
     )
     return registry
 
@@ -106,7 +119,10 @@ class SessionBucketTests(unittest.TestCase):
 
     def test_dynamic_table_matches_current_upstream_premium(self) -> None:
         # 🟢 2026-09-01 0.0.79 官方现状：premium_ids=[luna, solar-pro4]，
-        # flash / pro / glm-5.3-flash / ox / mimo → unlimited；solar-pro4 新队员进 premium
+        # flash / pro / glm-5.3-flash / ox / mimo → unlimited；solar-pro4 新队员进 premium。
+        # desktop_bucket 默认含 glm-5.2（0.0.79 语义），所以 z-ai/glm-5.2 在该测试里
+        # 判 premium；下面 test_dynamic_table_0_0_84_desktop_bucket_removes_glm_52
+        # 单独验证 0.0.84 的 desktop_bucket 收紧。
         registry = _registry_with({"openai/gpt-5.6-luna", "upstage/solar-pro4"})
         set_model_registry(registry)
         self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "unlimited")
@@ -115,6 +131,21 @@ class SessionBucketTests(unittest.TestCase):
         self.assertEqual(session_bucket_for_model("upstage/solar-pro4"), "premium")
         self.assertEqual(session_bucket_for_model("z-ai/glm-5.3-flash"), "unlimited")
         self.assertEqual(session_bucket_for_model("stealth/ox-alpha"), "unlimited")
+        # 0.0.79 兜底：glm-5.2 在 desktop_bucket（默认行为）
+        self.assertEqual(session_bucket_for_model("z-ai/glm-5.2"), "premium")
+
+    def test_dynamic_table_0_0_84_desktop_bucket_removes_glm_52(self) -> None:
+        # 🟢 2026-09-02 0.0.84 关键变化：glm-5.2 从桌面 premium bucket 移除，
+        # 桌面端并发桶收紧为 [luna, solar-pro4] → glm-5.2 走 referral 独立池，
+        # 不再吃桌面 premium 1 槽。
+        registry = _registry_with(
+            {"openai/gpt-5.6-luna", "upstage/solar-pro4"},
+            desktop_bucket_ids={"openai/gpt-5.6-luna", "upstage/solar-pro4"},
+        )
+        set_model_registry(registry)
+        self.assertEqual(session_bucket_for_model("z-ai/glm-5.2"), "unlimited")
+        # 反代 GLM_POOL 预检照常（防止无 referral 账号碰 glm-5.2 直接被封）
+        self.assertIn("z-ai/glm-5.2", GLM_POOL_MODEL_IDS)
 
     def test_empty_model_defaults_premium(self) -> None:
         self.assertEqual(session_bucket_for_model(""), "premium")

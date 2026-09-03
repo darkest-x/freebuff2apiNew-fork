@@ -103,6 +103,16 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
     # 不在 `FREEBUFF_PER_MODEL_SESSION_CAPS` 也不再有 `glm_v53_flash` 池（0.0.79
     # 已删除），但官方为它单独定义 `GLM_V53_FLASH_REASONING_EFFORTS = ["low", "high"]`
     # （仅 2 档，比 EFFORTS_THROUGH_MAX 收紧）。
+    #
+    # 🟢 2026-09-02 0.0.84 复核（orchestrator.js 87391 / 87485-87488）：官方将
+    # `GLM_V53_FLASH_REASONING_EFFORTS` 从 `["low", "high"]` 扩为 `["low", "high", "max"]`，
+    # 与 DEEPSEEK_V4 / OX_ALPHA 看齐；模型声明 `reasoningEffort:"max"`、
+    # `defaultEffort:"max"`（**0.0.79 是 "high"，0.0.84 升到 "max"**）。
+    # 同时新增 reward/streak 机制（`FREEBUFF_REWARD_MODEL_ID = GLM_V53_FLASH`）：
+    # 用户的 rateLimitsByModel[glm-5.3-flash].limit > 0 即视为"已解锁 referral 权益"，
+    # 触发 streak bonus 计数（不再依赖 `z-ai/glm-5.2` 单模型）。
+    # 对反代影响：GLM_POOL 预检仍以 `glm-5.2` 为 referral 门，但客户端可凭
+    # `glm-5.3-flash` 拿到独立奖励池（不影响我们的 fail-fast 逻辑）。
     FreebuffModel(
         "z-ai/glm-5.3-flash",
         "base2-free-glm-5-3-flash",
@@ -110,8 +120,8 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reviewer_agent_id="code-reviewer-glm-5-3-flash",
         context_window=1_000_000,
         input_modalities=("text", "image"),
-        reasoning_efforts=("low", "high"),
-        default_reasoning_effort="high",
+        reasoning_efforts=("low", "high", "max"),  # 🟢 0.0.84：扩为 3 档
+        default_reasoning_effort="max",  # 🟢 0.0.84：从 "high" 升 "max"
     ),
     # 2026-09-01 0.0.79 新增：Solar Pro 4（upstage/solar-pro4）
     # - `FREEBUFF_PREMIUM_MODEL_IDS` 成员（premium:true）

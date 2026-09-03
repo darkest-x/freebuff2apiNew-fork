@@ -193,6 +193,24 @@ def notice_for_error(error: Exception, model: str = "") -> str | None:
             + "上游账号信息发生变化（account_changed），"
             + "请稍后重试或联系管理员检查 token 配置。"
         )
+    # 🟢 2026-09-02 0.0.86 复核（orchestrator.js SESSION_ENDED_MESSAGE 134679 + freebuffSessionGateError 134680-134688）：
+    # 桌面端新增 `session_ended` 错误（`endsTheSession: !0` 的 GATE_CODE 都会折叠到这个 status）。
+    # 含义：上游的 free session 在 turn 跑的过程中被回收了（per-model cap 耗尽 / 并发抢占 /
+    # session_expired 30 分钟 grace / 主动 invalidate）。**官方客户端会自动
+    # onFreebuffSessionExpired → admitFreebuffSession → 走 CHECKPOINT_CONTINUATION_PROMPT
+    # 重放（orchestrator.js 136067-136072）**。我们反代需要做的是：把这条信息以
+    # 200 正常 completion 返回给客户端，并附"重新发送一次以续接"指引。
+    if (
+        "session_ended" in lower
+        or "free session ran out" in lower
+        or "free session ended" in lower
+    ):
+        return (
+            NOTICE_PREFIX
+            + "官方免费会话在本次对话运行中被回收（session_ended），"
+            + "通常由额度耗尽/会话被抢占/30 分钟无活动回收引起。"
+            + "已保留此前输出，请直接重新发送一次以在新会话中继续。"
+        )
     return None
 
 

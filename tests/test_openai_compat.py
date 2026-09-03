@@ -489,6 +489,23 @@ class OpenAICompatTests(unittest.TestCase):
         # flash 官方 efforts 不含 medium → 字段不对齐，回退默认 high
         self.assertEqual(payload["codebuff_metadata"]["freebuff_reasoning_effort"], "high")
 
+    def test_glm_5_3_flash_default_effort_is_max_0_0_84(self) -> None:
+        # 🟢 2026-09-02 0.0.84：GLM 5.3 Flash 默认 effort 从 "high" 升为 "max"，
+        # efforts 扩为 [low, high, max]（orchestrator.js 87391 / 87485-87488）。
+        payload = build_upstream_payload(
+            {
+                "model": "z-ai/glm-5.3-flash",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "ultra",
+            },
+            session=FreebuffSession(instance_id="i", model="z-ai/glm-5.3-flash"),
+            run_id="run-1",
+            client_id="client-1",
+        )
+        # ultra 不在 [low, high, max] → 字段不对齐，回退官方 defaultEffort = "max"
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertEqual(payload["codebuff_metadata"]["freebuff_reasoning_effort"], "max")
+
 
 if __name__ == "__main__":
     unittest.main()
