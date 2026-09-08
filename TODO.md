@@ -43,6 +43,56 @@
     仅是给老用户一次性更新存盘值，反代没有持久化历史，不受影响）。
 - 测试：`tests/` 全套通过 255 passed（0.0.79 时的 251 + 0.0.86 新增 4 个）。
 
+### 0b. 2026-09-08 桌面版 0.0.96 复核（模型池推导式 + slot-bound 并发体系 + gemini-3.8-flash）
+- 状态：**已完成**（模型表 / slot-bound 桶判定 / turn_spend_limit 软提示，提交见本次 commit）
+- 官方桌面版 0.0.96（09-08 21:50 安装，orchestrator.js 10,408,947 B）与 0.0.86 diff：
+  - **新增 16 常量 / 删除 10 常量**：净 +6（0.0.86=109 → 0.0.96=115）。
+    新增重点：`FREEBUFF_DESKTOP_CONCURRENCY_LIMITS`、`FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS`、
+    `FREEBUFF_HERO_MODEL_ID`、`FREEBUFF_TURN_SPEND_LIMIT_ERROR_CODE/MESSAGE`、
+    `FREEBUFF_PLAN_METERED_CATALOG_MODEL_IDS`、`FREEBUFF_PRO_ONLY_CATALOG_MODEL_IDS`、
+    `FREEBUFF_UNTRACED_TRAINING_MODEL_IDS`、`FREEBUFF_GEMINI_38_FLASH`（模型）等。
+    删除重点：**整个旧并发三件套** `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS` /
+    `FREEBUFF_DESKTOP_SESSION_LIMITS` / `FREEBUFF_SUBSCRIBER_DESKTOP_SESSION_LIMITS`；
+    `FREEBUFF_EARN_*` / `FREEBUFF_LEVELS` / `FREEBUFF_TRUST_CURRENCY_NAME`（earn 体系重构为 freebucks）。
+  - **并发体系重构（桌面端）**：slot-bound vs multi-tab 两档。
+    `FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS = [luna, gemini-3.8-flash, muse-spark-1.3,
+    muse-spark-1.2]` 占 1 个 slot；`FREEBUFF_DESKTOP_CONCURRENCY_LIMITS =
+    { free:{slot-bound:1, multi-tab:3}, subscriber:{slot-bound:3, multi-tab:8} }`。
+    反代语义映射：slot-bound → 旧 premium（并发 1）；multi-tab → 旧 unlimited（并发 3）。
+  - **模型池推导式**：`FREEBUFF_PREMIUM_MODEL_IDS` 改为 `FREEBUFF_MODELS.filter(model.premium)`
+    → 推导结果 **[luna, muse-spark-1.2]**。solar-pro4 因
+    `FREEBUFF_SOLAR_PRO_4_ENTITLEMENT.fullAccess.premium = !1` **掉出 premium**（归
+    multi-tab 无限通道，Freebucks 常态 5 定价，Labor Day 0 价到 Sep 7 PT）。
+  - **新模型**：`google/gemini-3.8-flash`（premium:true、multimodal、PRO_ONLY 目录、
+    spend cap 0.5 —— 顶替 solar-pro4 的原 0.5 cap；agent base2-free-gemini-3-8-flash /
+    code-reviewer-gemini-3-8-flash）；`meta/muse-spark-1.3-contributor`（premium:true、
+    training、agent base2-free-muse-spark-1-3 / code-reviewer-muse-spark-1-3）。
+  - **默认模型**：`DEFAULT_FREEBUFF_MODEL_ID = glm-5.3-flash`（0.0.86 曾迁到
+    deepseek-v4-flash，2026-09-05 又迁回）；`PREVIOUS_DEFAULT = deepseek-v4-flash`。
+  - **新错误** `turn_spend_limit`：单 turn 用量上限，会话**不结束**（isRetryable:false），
+    官方提示 "send a new message to continue from here."。
+  - **新响应/遥测头**：`X-Freebuff-Event-Id` / `X-Freebuff-Render-Delay-Ms`（first-party
+    view ack）、`X-Freebuff-Dwell-Ms`（停留）—— 客户端→vack 网关，**不进 chat 上游头**，反代无关。
+  - **协议核心未变**：SESSION_ENDED_MESSAGE / GATE_CODES / 45s 心跳 / 30min grace /
+    600s idle release / codebuff_metadata（freebuff_instance_id + multi_session "1" +
+    llm_step_number）全部与 0.0.86 一致。
+- **对反代的修改**：
+  - `models.py`：新增 gemini-3.8-flash / muse-spark-1.3 条目（agent 三映射齐）；
+    solar-pro4 注释更新（premium → false）；UNLIMITED_SESSION_MODEL_IDS 兜底加
+    solar-pro4；DEFAULT_MODEL 不变（glm-5.3-flash，0.0.96 官方一致）；
+  - `model_registry.py`：desktop_bucket 解析源改为 `FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS`
+    （新增常量），旧 `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS` 保留为兼容回退；
+    premium 池 0.0.96 为推导式、静态解析拿不到 → 以 snapshot 承载 [luna, muse-1.2]；
+  - `model_registry_snapshot.json`：**重写**（修复此前快照被污染——desktop_bucket 混入
+    注释文本垃圾值）；premium=[luna, muse-1.2]；desktop_bucket(slot-bound)=
+    [luna, gemini-3.8-flash, muse-1.3, muse-1.2]；新增 gemini-38/muse-13 模型条目；
+  - `notices.py`：新增 `turn_spend_limit` 中文软提示（会话仍有效，引导发新消息继续）；
+  - `tests/test_model_pools.py`：`test_dynamic_table_matches_current_upstream_premium` 重写
+    为 0.0.96 语义（solar-pro4 → unlimited，gemini/muse → premium）；新增
+    `test_dynamic_table_0_0_96_slot_bound_semantics` 验证回退链；
+    `tests/test_notices.py`：新增 turn_spend_limit 长/短两个用例。
+- 测试：`tests/` 全套通过 **257 passed**（0.0.86 的 255 + 0.0.96 新增 2）。
+
 ### 1. 模型列表补齐(对齐 Worker 1.7.2 MODELS 表)
 - 状态：**已完成** — `freebuff2api/models.py` 补 8 个新模型：
   `openai/gpt-5.6-luna`、`z-ai/glm-5.2`、`poolside/laguna-s-2.1`、`openrouter/poolside/laguna-s-2.1`、`inclusionai/ling-3.0-flash:free`、`crof/greg-2-ultra`、`crof/greg-2-super`、`anthropic/claude-fable-5`、`meta/muse-spark-1.2-contributor`

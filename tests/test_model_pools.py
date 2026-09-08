@@ -42,9 +42,9 @@ def _registry_with(
 ) -> ModelRegistry:
     """构造带动态表的注册表桩（不触发网络）。
 
-    🟢 0.0.84：默认 desktop_bucket_ids = premium_ids ∪ {"z-ai/glm-5.2"}（模拟
-    0.0.79 行为以便现存测试通过）。要测 0.0.84 真实语义必须显式传
-    desktop_bucket_ids={luna, solar-pro4}（glm-5.2 **从 bucket 移除**）。
+    🟢 2026-09-08 0.0.96：默认 desktop_bucket_ids = premium_ids ∪ {"z-ai/glm-5.2"}
+    （模拟旧版回退链以便复原现测试）。要测 0.0.96 slot-bound 真实语义必须显式传
+    desktop_bucket_ids={luna, gemini-3.8-flash, muse-1.3, muse-1.2}。
     """
     registry = ModelRegistry()
     if desktop_bucket_ids is None:
@@ -118,32 +118,46 @@ class SessionBucketTests(unittest.TestCase):
         self.assertEqual(session_bucket_for_model("mimo/mimo-v2.5"), "unlimited")
 
     def test_dynamic_table_matches_current_upstream_premium(self) -> None:
-        # 🟢 2026-09-01 0.0.79 官方现状：premium_ids=[luna, solar-pro4]，
-        # flash / pro / glm-5.3-flash / ox / mimo → unlimited；solar-pro4 新队员进 premium。
-        # desktop_bucket 默认含 glm-5.2（0.0.79 语义），所以 z-ai/glm-5.2 在该测试里
-        # 判 premium；下面 test_dynamic_table_0_0_84_desktop_bucket_removes_glm_52
-        # 单独验证 0.0.84 的 desktop_bucket 收紧。
-        registry = _registry_with({"openai/gpt-5.6-luna", "upstage/solar-pro4"})
+        # 🟢 2026-09-08 0.0.96 官方现状：premium_ids=[luna, muse-spark-1.2]（推导式），
+        # solar-pro4 premium → false（ENTITLEMENT）→ 掉出 premium；
+        # flash / pro / glm-5.3-flash / ox / mimo / solar-pro4 → unlimited（multi-tab）；
+        # luna / gemini-3.8-flash / muse-1.2 / muse-1.3 → slot-bound（desktop_bucket）。
+        # desktop_bucket 显式传 slot-bound 集合（0.0.96 语义），glm-5.2 不再占槽。
+        registry = _registry_with(
+            {"openai/gpt-5.6-luna", "meta/muse-spark-1.2-contributor"},
+            desktop_bucket_ids={
+                "openai/gpt-5.6-luna",
+                "google/gemini-3.8-flash",
+                "meta/muse-spark-1.3-contributor",
+                "meta/muse-spark-1.2-contributor",
+            },
+        )
         set_model_registry(registry)
         self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "unlimited")
         self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-pro"), "unlimited")
         self.assertEqual(session_bucket_for_model("openai/gpt-5.6-luna"), "premium")
-        self.assertEqual(session_bucket_for_model("upstage/solar-pro4"), "premium")
+        # 0.0.96：solar-pro4 premium → false，走 multi-tab（unlimited）
+        self.assertEqual(session_bucket_for_model("upstage/solar-pro4"), "unlimited")
         self.assertEqual(session_bucket_for_model("z-ai/glm-5.3-flash"), "unlimited")
         self.assertEqual(session_bucket_for_model("stealth/ox-alpha"), "unlimited")
-        # 0.0.79 兜底：glm-5.2 在 desktop_bucket（默认行为）
-        self.assertEqual(session_bucket_for_model("z-ai/glm-5.2"), "premium")
-
-    def test_dynamic_table_0_0_84_desktop_bucket_removes_glm_52(self) -> None:
-        # 🟢 2026-09-02 0.0.84 关键变化：glm-5.2 从桌面 premium bucket 移除，
-        # 桌面端并发桶收紧为 [luna, solar-pro4] → glm-5.2 走 referral 独立池，
-        # 不再吃桌面 premium 1 槽。
-        registry = _registry_with(
-            {"openai/gpt-5.6-luna", "upstage/solar-pro4"},
-            desktop_bucket_ids={"openai/gpt-5.6-luna", "upstage/solar-pro4"},
-        )
-        set_model_registry(registry)
+        # 0.0.96 slot-bound：gemini-3.8-flash / muse-spark 系列占并发槽 → premium
+        self.assertEqual(session_bucket_for_model("google/gemini-3.8-flash"), "premium")
+        self.assertEqual(session_bucket_for_model("meta/muse-spark-1.3-contributor"), "premium")
+        # 0.0.96：glm-5.2 走 referral 独立池 → unlimited（slot-bound 不含它）
         self.assertEqual(session_bucket_for_model("z-ai/glm-5.2"), "unlimited")
+
+    def test_dynamic_table_0_0_96_slot_bound_semantics(self) -> None:
+        # 🟢 2026-09-08 0.0.96 并发体系重构：desktop_bucket_ids = slot-bound 集合
+        # [luna, gemini-3.8-flash, muse-1.3, muse-1.2]；premium_ids 推导 = [luna, muse-1.2]。
+        # 即使 slot-bound 集合为空（GitHub main 滞后），premium_ids 兜底仍能覆盖 luna/muse。
+        registry = _registry_with({"openai/gpt-5.6-luna", "meta/muse-spark-1.2-contributor"})
+        set_model_registry(registry)
+        # 默认兜底 desktop_bucket = premium_ids ∪ {glm-5.2}（旧行为），此处验证
+        # 回退链仍可用：luna → premium，gemini 不在 premium 无 slot-bound 声明 → 按
+        # 兜底 unlimited（与官方 0.0.96 slot-bound 语义有差异，但这是 GitHub main
+        # 滞后时的退路，动态刷新补齐后即正确）。
+        self.assertEqual(session_bucket_for_model("openai/gpt-5.6-luna"), "premium")
+        self.assertEqual(session_bucket_for_model("meta/muse-spark-1.2-contributor"), "premium")
         # 反代 GLM_POOL 预检照常（防止无 referral 账号碰 glm-5.2 直接被封）
         self.assertIn("z-ai/glm-5.2", GLM_POOL_MODEL_IDS)
 

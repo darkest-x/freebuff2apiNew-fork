@@ -79,6 +79,28 @@ class NoticeMappingTests(unittest.TestCase):
         assert notice is not None
         self.assertIn("会话在本次对话运行中被回收", notice)
 
+    def test_turn_spend_limit_maps_to_soft_notice_0_0_96(self) -> None:
+        # 🟢 2026-09-08 0.0.96 复核：turn_spend_limit（FREEBUFF_TURN_SPEND_LIMIT_ERROR_CODE）
+        # —— 单 turn 额度上限，**会话不结束**：官方提示 "Your session is still
+        # available — send a new message to continue from here."。反代应以软提示
+        # 返回（引导发新消息继续），不能当 session 失效/重试处理。
+        msg = (
+            "APICallError: This turn reached its model usage limit. "
+            "Your session is still available \u2014 send a new message "
+            "to continue from here."
+        )
+        notice = notice_for_error(CodebuffError(msg, 429))
+        self.assertIsNotNone(notice)
+        assert notice is not None
+        self.assertIn("中转提示", notice)
+        self.assertIn("发送新消息", notice)
+
+    def test_turn_spend_limit_short_code_maps_to_soft_notice(self) -> None:
+        notice = notice_for_error(CodebuffError("Codebuff turn_spend_limit: 429", 429))
+        self.assertIsNotNone(notice)
+        assert notice is not None
+        self.assertIn("发送新消息", notice)
+
 
 if __name__ == "__main__":
     unittest.main()

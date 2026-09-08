@@ -124,13 +124,16 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         default_reasoning_effort="max",  # 🟢 0.0.84：从 "high" 升 "max"
     ),
     # 2026-09-01 0.0.79 新增：Solar Pro 4（upstage/solar-pro4）
-    # - `FREEBUFF_PREMIUM_MODEL_IDS` 成员（premium:true）
-    # - 独立 daily 池 `solar_pro4`（`FREEBUFF_PER_MODEL_SESSION_CAPS[solar-pro4] =
-    #   {limit:1, pool:"solar_pro4", poolLabel:"Daily"}`），并发上限 1
-    # - 单 session 消耗 0.5 单位额度（`FREEBUFF_PER_MODEL_SESSION_SPEND_CAPS`），
-    #   1 天 6 次 premium 额度下可跑 12 次
+    # - 当时 `FREEBUFF_PREMIUM_MODEL_IDS` 成员（premium:true），独立 daily 池
+    #   `solar_pro4`（limit=1），单 session 消耗 0.5 单位额度
     # - `experimental:true` + `multimodal:false` + 上下文 500,000 + 不支持 effort 调整
     # - 不带 `warning` 字段（不告训练）
+    #
+    # 🟢 2026-09-08 0.0.96 复核：`FREEBUFF_SOLAR_PRO_4_ENTITLEMENT.fullAccess.premium = !1`
+    #   → **premium 掉回 false**（0.0.96 起 solar-pro4 归 multi-tab 无限通道，改走
+    #   Freebucks 计费：「0 Freebucks Labor Day weekend (through Sep 7 PT)」→
+    #   「5 Freebucks」常态定价）。per-model spend cap 也移出（改给 gemini-3.8-flash）。
+    #   并发桶语义见 model_registry（slot-bound 列表已不含 solar-pro4）。
     FreebuffModel(
         "upstage/solar-pro4",
         "base2-free-solar-pro4",
@@ -177,6 +180,46 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reasoning_efforts=("low", "high", "max"),
         default_reasoning_effort="high",
     ),
+    # 🟢 2026-09-08 0.0.96 新增：Gemini 3.8 Flash（google/gemini-3.8-flash）
+    # - `premium:true` + `multimodal:true` + `isNew:true`，efforts=EFFORTS_THROUGH_MAX、
+    #   defaultEffort="high"（orchestrator.js 100486-100496）
+    # - **订阅目录专属**：`FREEBUFF_PRO_ONLY_CATALOG_MODEL_IDS = [gemini-3.8-flash]`，
+    #   `LIMITED_TIER_PLAN_ONLY_MODEL_IDS = [luna, gemini-3.8-flash]`，
+    #   `PLAN_METERED_CATALOG_MODEL_IDS` 成员（100648-100689）
+    # - 桌面端 **slot-bound** 模型（`FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS` 成员），
+    #   单 session 消耗 0.5 单位额度（`FREEBUFF_PER_MODEL_SESSION_SPEND_CAPS`，顶替
+    #   solar-pro4）；不在 `FREEBUFF_MODELS`（public 桌面集合）
+    # - agent 三映射：base2-free-gemini-3-8-flash / base3-free-gemini-3-8-flash /
+    #   code-reviewer-gemini-3-8-flash（149702 / 149720 / 149751）
+    # - ⚠️ 官方 ctx 常量表（FREEBUFF_MODEL_CONTEXT_WINDOWS）未收录，tagline 标
+    #   "1M context" → 按 1_000_000 暂记，待活体测试确认
+    FreebuffModel(
+        "google/gemini-3.8-flash",
+        "base2-free-gemini-3-8-flash",
+        base3_agent_id="base3-free-gemini-3-8-flash",
+        reviewer_agent_id="code-reviewer-gemini-3-8-flash",
+        context_window=1_000_000,
+        input_modalities=("text", "image"),
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        default_reasoning_effort="high",
+    ),
+    # 🟢 2026-09-08 0.0.96 新增：Muse Spark 1.3（meta/muse-spark-1.3-contributor）
+    # - `premium:true` + `dataUse:training` + `isNew:true`，efforts=EFFORTS_THROUGH_XHIGH、
+    #   defaultEffort="xhigh"（orchestrator.js 100561-100574）；1.2→1.3 平替文案提示
+    # - 桌面端 **slot-bound** 模型（`FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS` 成员，
+    #   muse-spark 1.2/1.3 都在）；`UNTRACED_TRAINING_MODEL_IDS` 成员（训练但不 trace）
+    # - agent：base2-free-muse-spark-1-3 / base3-free-muse-spark-1-3 /
+    #   code-reviewer-muse-spark-1-3（149737 / 149718 / 149753）
+    # - ctx 常量表同未收录，按 muse-spark-1.2 的 1M 对齐暂记
+    FreebuffModel(
+        "meta/muse-spark-1.3-contributor",
+        "base2-free-muse-spark-1-3",
+        base3_agent_id="base3-free-muse-spark-1-3",
+        reviewer_agent_id="code-reviewer-muse-spark-1-3",
+        context_window=1_000_000,
+        reasoning_efforts=("minimal", "low", "medium", "high", "xhigh"),
+        default_reasoning_effort="xhigh",
+    ),
 )
 
 # 默认模型：0.0.79 官方改为 `glm-5.3-flash`（不再用 luna）。
@@ -187,25 +230,21 @@ DEFAULT_MODEL = next(m for m in FREEBUFF_MODELS if m.id == "z-ai/glm-5.3-flash")
 
 # 官方 desktop session bucket 的**硬编码兜底**（仅动态注册表不可用时生效）。
 #
-# 🟢 2026-09-01 桌面版 0.0.79 复核落地：
-#   - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, solar-pro4]`（**glm-5.3-flash 掉出**）
-#   - `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, solar-pro4]`
-#     （0.0.63 是 [luna, glm-5.2, glm-5.3-flash]）→ GLM 5.3 Flash 在桌面端归
-#     **unlimited** 通道
-#   - 旧 `FREEBUFF_PER_MODEL_SESSION_CAPS = {glm-5.3-flash:{limit:2,pool:"glm_v53_flash"}}`
-#     在 0.0.79 已**删除**（不再有 glm_v53_flash 池）；GLM 5.3 Flash 现在吃
-#     unlimited 通道的并发上限
-#   - 新增 `FREEBUFF_PER_MODEL_SESSION_SPEND_CAPS = {solar-pro4: 0.5}`（单
-#     session 消耗 0.5 单位额度；1 天 6 次 premium 额度 → solar-pro4 可跑 12 次）
-#   - 新增 `FREEBUFF_SUBSCRIBER_DESKTOP_SESSION_LIMITS = {premium:3, unlimited:8}`
-#     （订阅用户扩展）；普通用户仍是 `{premium:1, unlimited:3}` —— 反代
-#     `FREEBUFF_ROTATION_MODE` 决策不需要跟随，按 token 配置的并发控制走
-#   - 新增 `FREEBUFF_DESKTOP_IDLE_RELEASE_MS = 600_000`（10 分钟空闲回收）；
-#     反代单进程串行复用 session 无空闲问题，但需注意上游可能在空闲 10 分钟
-#     后自动释放，与我们的"长 session 复用"产生认知差异 —— 见 codebuff.py
-#     `_ensure_session_locked` 注释。
+# 🟢 2026-09-08 桌面版 0.0.96 复核（并发体系重构，取代 0.0.79-0.0.86 三常量）：
+#   - 删除 `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS` / `FREEBUFF_DESKTOP_SESSION_LIMITS` /
+#     `FREEBUFF_SUBSCRIBER_DESKTOP_SESSION_LIMITS`，改为：
+#     - `FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS = [luna, gemini-3.8-flash,
+#       muse-spark-1.3, muse-spark-1.2]`（占 1 个"slot-bound"并发槽；limited 无订阅
+#       用户 getAllModels 也归 slot-bound）
+#     - `FREEBUFF_DESKTOP_CONCURRENCY_LIMITS = {free:{slot-bound:1, multi-tab:3},
+#       subscriber:{slot-bound:3, multi-tab:8}}`（普通用户 slot-bound 1 + multi-tab 3；
+#       订阅用户 slot-bound 3 + multi-tab 8）
+#   - 反代映射：slot-bound → 旧 `premium` 桶语义（并发 1）；multi-tab → 旧 `unlimited`
+#     （并发 3）。因此本兜底集合 = 「旧 premium 桶补集」仍成立，只是把 solar-pro4 移出
+#     premium（0.0.96 `SOLAR_PRO_4_ENTITLEMENT.fullAccess.premium = !1`，走 multi-tab
+#     无限通道 + Freebucks 计费）。
 # 正确性由 model_registry 动态维护（2h 刷新跟随），这里只保留
-# "注册表从未成功加载过"时的最后兜底，镜像官方桌面 premium 桶补集。
+# "注册表从未成功加载过"时的最后兜底，镜像官方桌面 multi-tab 集合补集。
 UNLIMITED_SESSION_MODEL_IDS = frozenset(
     {
         "mimo/mimo-v2.5",
@@ -219,6 +258,8 @@ UNLIMITED_SESSION_MODEL_IDS = frozenset(
         "stealth/ox-alpha",
         # 2026-09-01 0.0.79：GLM 5.3 Flash 从 premium 池移除，归 unlimited 通道
         "z-ai/glm-5.3-flash",
+        # 🟢 2026-09-08 0.0.96：solar-pro4 premium → false，归 multi-tab 无限通道
+        "upstage/solar-pro4",
     }
 )
 
@@ -264,9 +305,11 @@ def _dynamic_premium_ids() -> frozenset[str] | None:
     """从动态模型注册表读取当前 premium 池（上游 freebuff-models.ts 的
     FREEBUFF_PREMIUM_MODEL_IDS）。注册表未加载时返回 None（调用方走兜底）。
 
-    🟢 0.0.79 语义澄清：这里返回的 premium_ids **只**是 FREEBUFF_PREMIUM_MODEL_IDS
-    （[luna, solar-pro4]）。桌面端并发桶判定优先走 desktop_bucket_ids
-    （premium ∪ GLM = [luna, glm-5.2, solar-pro4]），见
+    🟢 0.0.96 语义：FREEBUFF_PREMIUM_MODEL_IDS 改为
+    ``FREEBUFF_MODELS.filter(model.premium)`` **动态推导**，静态数组解析拿不到
+    → 以 snapshot/兜底为准。推导结果 [luna, muse-spark-1.2]（solar-pro4 因
+    ENTITLEMENT premium:false 掉出）。桌面端并发槽判定优先走 desktop_bucket_ids
+    （slot-bound = [luna, gemini-3.8-flash, muse-spark-1.3, muse-spark-1.2]），见
     :func:`session_bucket_for_model`。
     """
     registry = get_model_registry()
@@ -276,9 +319,11 @@ def _dynamic_premium_ids() -> frozenset[str] | None:
 
 
 def _dynamic_desktop_bucket_ids() -> frozenset[str] | None:
-    """动态表里的桌面端 premium 并发桶（FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS，
-    = premium ∪ GLM = [luna, glm-5.2, solar-pro4]）。GitHub main 未同步该常量时
-    集合为空 → 视为未提供，调用方回退 premium_ids。"""
+    """动态表里的桌面端 slot-bound 并发桶（0.0.96 起解析
+    FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS = [luna, gemini-3.8-flash,
+    muse-spark-1.3, muse-spark-1.2]，旧 0.0.79-0.0.86 的
+    FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS 已删除不再出现）。GitHub main
+    未同步该常量时集合为空 → 视为未提供，调用方回退 premium_ids。"""
     registry = get_model_registry()
     if registry is None or registry.table is None:
         return None
@@ -289,12 +334,14 @@ def _dynamic_desktop_bucket_ids() -> frozenset[str] | None:
 
 
 def session_bucket_for_model(model: str) -> str:
-    """返回官方 desktop session bucket：``premium`` 或 ``unlimited``。
+    """返回官方 desktop session bucket：``premium``（slot-bound 槽）或 ``unlimited``
+    （multi-tab 槽）。
 
-    判定优先级（🟢 2026-09-01 0.0.79 更新）：
-    1. 动态表的 desktop_bucket_ids —— 官方桌面端并发桶（premium ∪ GLM =
-       [luna, glm-5.2, solar-pro4]）在池间挪动时自动跟随，无需改代码部署；
-    2. 动态表 premium_ids（0.0.79 = [luna, solar-pro4]，不含 glm-5.2/glm-5.3-flash）；
+    判定优先级（🟢 2026-09-08 0.0.96 更新）：
+    1. 动态表的 desktop_bucket_ids —— 官方桌面端 slot-bound 并发桶（0.0.96 =
+       [luna, gemini-3.8-flash, muse-spark-1.3, muse-spark-1.2]）在池间挪动时
+       自动跟随，无需改代码部署；solar-pro4 / glm-5.2 不在其中 → multi-tab（unlimited）；
+    2. 动态表 premium_ids（0.0.96 推导 = [luna, muse-spark-1.2]，以 snapshot 承载）；
     3. 硬编码 UNLIMITED_SESSION_MODEL_IDS 兜底（注册表不可用时）。
 
     ⚠️ 旧实现把 FREEBUFF_WEB_PREMIUM_MODEL_IDS 混入 premium_ids，导致

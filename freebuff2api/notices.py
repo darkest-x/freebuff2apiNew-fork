@@ -211,6 +211,18 @@ def notice_for_error(error: Exception, model: str = "") -> str | None:
             + "通常由额度耗尽/会话被抢占/30 分钟无活动回收引起。"
             + "已保留此前输出，请直接重新发送一次以在新会话中继续。"
         )
+    # 🟢 2026-09-08 0.0.96 复核（orchestrator.js 101052 + 102620-102629）：
+    # 新增 `turn_spend_limit` 错误（FREEBUFF_TURN_SPEND_LIMIT_ERROR_CODE =
+    # "turn_spend_limit"）。含义：单个 turn 达到了模型用量上限——**会话本身仍
+    # 有效**，官方提示 "Your session is still available — send a new message to
+    # continue from here."（isRetryable:false，不结束会话）。反代不要当
+    # session 失效处理，也不要重试；返回软提示让客户端直接发新消息继续。
+    if "turn_spend_limit" in lower or "reached its model usage limit" in lower:
+        return (
+            NOTICE_PREFIX
+            + "本回合达到模型用量上限（turn_spend_limit），"
+            + "当前会话仍然有效，请直接发送新消息从当前位置继续。"
+        )
     return None
 
 

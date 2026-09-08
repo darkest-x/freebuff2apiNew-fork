@@ -69,13 +69,17 @@ class DynamicModelTable:
     models: list[DynamicModelEntry]
     premium_ids: set[str] = field(default_factory=set)
     glm_ids: set[str] = field(default_factory=set)
-    # 🟢 0.0.79 新增：桌面端 premium 并发桶
-    # `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, solar-pro4]`。
+    # 🟢 2026-09-08 0.0.96 重构：桌面端 **slot-bound 并发桶**
+    # `FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS = [luna, gemini-3.8-flash,
+    #   muse-spark-1.3, muse-spark-1.2]`（取代 0.0.79-0.0.86 的
+    #   `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS`）。
     # 与 premium_ids 的区别很重要：
-    #   - premium_ids    = FREEBUFF_PREMIUM_MODEL_IDS（桌面端真 premium 池）—— 已排除
-    #                      WEB_PREMIUM 混入（见 _parse_model_pools 注释，kimi/luna-es/muse
-    #                      都在 web premium 但走各自通道，绝不能进 bucket 判定）
-    #   - desktop_bucket = premium ∪ GLM（桌面端并发桶语义，session_bucket_for_model 用它）
+    #   - premium_ids    = FREEBUFF_PREMIUM_MODEL_IDS（真 premium 池）。0.0.96 改为
+    #                      `FREEBUFF_MODELS.filter(model.premium)` **动态推导**（静态
+    #                      数组解析拿不到，依赖 snapshot / 兜底）—— 推导结果
+    #                      [luna, muse-spark-1.2]。
+    #   - desktop_bucket = slot-bound 集合（桌面端并发槽语义，session_bucket_for_model
+    #                      用它；slot-bound → premium 桶/并发 1，其余 multi-tab / 并发 3）
     # GitHub main 可能滞后桌面版，该常量缺失时回退 premium_ids。
     desktop_bucket_ids: set[str] = field(default_factory=set)
     # 🔴 蜜罐/god-only 模型（FREEBUFF_WEB_GOD_ONLY_MODELS）：上游隐藏的评测路由，
@@ -461,15 +465,19 @@ def _parse_model_pools(
         # WEB_PREMIUM = premium ∪ {kimi, luna-es, muse} 是 Web 端可见集合，与
         # 桌面端并发桶判定无关。session_bucket_for_model 用的是桌面端语义。
         "premium": ("FREEBUFF_PREMIUM_MODEL_IDS",),
-        # 桌面端 premium 并发桶（0.0.84 = [luna, solar-pro4]）：
-        # 桌面端并发槽判定（premium 1 / unlimited 3）用它。
-        # 🟢 0.0.84 关键变化：glm-5.2 **从桌面 premium bucket 移除**（0.0.79 含
-        # glm-5.2 = [luna, glm-5.2, solar-pro4]；0.0.84 = [luna, solar-pro4]）。
-        # 这是 0.0.79→0.0.84 桌面并发语义的实质性收紧：glm-5.2 走 referral 解锁
-        # 独立池，不再吃桌面 premium 1 槽。
-        # GitHub main 滞后桌面版时集合可能为空 → session_bucket_for_model
-        # 回退 premium_ids。
-        "desktop_bucket": ("FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS",),
+        # 桌面端 **slot-bound 并发桶**（并发体系 0.0.96 重构）：
+        # 🟢 2026-09-08 0.0.96：`FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS =
+        #   [luna, gemini-3.8-flash, muse-spark-1.3, muse-spark-1.2]`（取代
+        #   0.0.79-0.0.86 的 `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS`）。
+        #   slot-bound 模型占 1 个并发槽（free 上限 1 / subscriber 3）；其余模型
+        #   走 multi-tab（free 3 / subscriber 8）。反代把 slot-bound 映射为旧的
+        #   `premium` 桶语义。solar-pro4 / glm-5.2 **不在** slot-bound（走 multi-tab）。
+        #   GitHub main 滞后桌面版时集合可能为空 → session_bucket_for_model
+        #   回退 premium_ids。
+        "desktop_bucket": (
+            "FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS",
+            "FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS",
+        ),
         "glm": ("FREEBUFF_GLM_V52_MODEL_IDS",),
         # god-only：官方隐藏评测路由（kimi-k3-eco / luna-es 等），见 DynamicModelTable 注释
         "god_only": ("FREEBUFF_WEB_GOD_ONLY_MODELS",),
