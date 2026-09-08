@@ -20,11 +20,66 @@ UNLIMITED_HINT = (
     "继续使用。"
 )
 
+# 🟢 2026-09-08 0.0.96 Freebucks 每小时定价表（FREEBUCKS_SESSION_PRICES，
+# orchestrator.js 148890-148903）—— 小时价为"创建 session 一次性扣费"单位。
+# 免费档每日 Freebucks：full tier=100 / limited tier=25（FREEBUCKS_PLANS.free，
+# 148910-148927），每天太平洋午夜重置；deepseek-v4-flash 高峰 +10（至 3 AM PT）。
+FREEBUCKS_HOURLY_PRICES = {
+    "z-ai/glm-5.3-flash": 5,
+    "mimo/mimo-v2.5": 10,
+    "deepseek/deepseek-v4-flash": 15,
+    "openai/gpt-5.6-luna": 20,
+    "openai/gpt-5.6-luna-es": 20,
+    "upstage/solar-pro4": 5,  # 常态 Solar PRO_4 offer=5（0 促销价已于 09-07 结束）
+    "crof/kimi-k3-eco": 5,
+    "meta/muse-spark-1.3-contributor": 15,
+    "meta/muse-spark-1.2-contributor": 15,
+    "google/gemini-3.8-flash": 50,
+}
+
+
+def _freebucks_hint(model: str = "") -> str:
+    """按 0.0.96 定价给出换便宜模型建议（免费档每日 100/25 Freebucks）。"""
+    if not model:
+        return ""
+    price = FREEBUCKS_HOURLY_PRICES.get(model)
+    if price is None:
+        return ""
+    cheaper = [
+        mid for mid, p in FREEBUCKS_HOURLY_PRICES.items() if p < price
+    ]
+    if not cheaper:
+        return ""
+    names = " / ".join(cheaper)
+    return f"当前模型每小时 {price} Freebucks，可先切换更便宜的模型（{names}）节省额度。"
+
 
 def _rate_limit_notice(message: str, model: str = "") -> str:
-    """官方 rate_limited：premium/limited 每日额度耗尽。"""
+    """官方 rate_limited（429）—— 0.0.96 起含 Freebucks 余额/月度/每日三分支。"""
     info = parse_429_info(message)
-    reset_at = info.get("reset_at_sha") or "北京时间 15:00"
+    reset_at = info.get("reset_at_sha") or "北京时间次日 15:00"
+    lower = message.lower()
+
+    # 🟢 0.0.96：freebucksShortfall（429 body 携带字段名，必含 "freebucksShortfall"；
+    #   渲染文案 "costs Y Freebucks an hour and you have Z" 是客户端侧 errorFor 生成，
+    #   上游 body 不一定带 → 以字段名/关键组合命中）
+    if (
+        "freebucksshortfall" in lower
+        or ("freebucks" in lower and "an hour" in lower)
+    ):
+        return (
+            NOTICE_PREFIX
+            + "账号 Freebucks 余额不足，无法按该模型的小时价创建会话"
+            + f"（{_freebucks_hint(model)}）。"
+            + f"每日 Freebucks 将于 {reset_at} 自动重置，或等待今天额度恢复后重试。"
+        )
+    # 🟢 0.0.96：pacific_month —— 月度用量额度用尽（订阅计量）
+    if "pacific_month" in lower or "month's usage allowance" in lower:
+        return (
+            NOTICE_PREFIX
+            + "本账号本月免费用量配额已用完（月度重置），"
+            + f"预计恢复时间：{reset_at}。{UNLIMITED_HINT}"
+        )
     if info.get("model"):
         model_part = f"涉及模型：{info.get('model')}。"
     elif model:

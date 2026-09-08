@@ -101,6 +101,41 @@ class NoticeMappingTests(unittest.TestCase):
         assert notice is not None
         self.assertIn("发送新消息", notice)
 
+    def test_freebucks_shortfall_maps_to_soft_notice_0_0_96(self) -> None:
+        # 🟢 2026-09-08 0.0.96：Freebucks 余额不足（429 body 带 freebucksShortfall
+        # 字段）→ 中文提示小时价与充值/重置。不能当旧"每日额度用完"笼统处理。
+        msg = (
+            'Freebuff session rate_limited: 429 {"status":"rate_limited",'
+            '"model":"deepseek/deepseek-v4-flash","period":"pacific_day",'
+            '"freebucksShortfall":{"price":15,"balance":3},'
+            '"retryAfterMs":3600000,"resetAt":"2026-09-09T00:00:00-07:00"}'
+        )
+        notice = notice_for_error(CodebuffError(msg, 429), "deepseek/deepseek-v4-flash")
+        self.assertIsNotNone(notice)
+        assert notice is not None
+        self.assertIn("Freebucks", notice)
+        self.assertIn("余额不足", notice)
+        self.assertIn("15", notice)
+
+    def test_pacific_month_quota_maps_to_soft_notice_0_0_96(self) -> None:
+        # 🟢 2026-09-08 0.0.96：月度用量额度用尽（period=pacific_month 或
+        # 渲染文案 "month's usage allowance"）→ 月度提示。
+        msg = (
+            'Freebuff session rate_limited: 429 {"status":"rate_limited",'
+            '"model":"openai/gpt-5.6-luna","period":"pacific_month",'
+            '"retryAfterMs":86400000,"resetAt":"2026-09-01T00:00:00-07:00"}'
+        )
+        notice = notice_for_error(CodebuffError(msg, 429), "openai/gpt-5.6-luna")
+        self.assertIsNotNone(notice)
+        assert notice is not None
+        self.assertIn("月度", notice)
+        notice2 = notice_for_error(
+            CodebuffError("Freebuff session rate_limited: 429 month's usage allowance", 429)
+        )
+        self.assertIsNotNone(notice2)
+        assert notice2 is not None
+        self.assertIn("月度", notice2)
+
 
 if __name__ == "__main__":
     unittest.main()
