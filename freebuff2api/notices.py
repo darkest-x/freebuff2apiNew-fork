@@ -20,17 +20,26 @@ UNLIMITED_HINT = (
     "继续使用。"
 )
 
-# 🟢 2026-09-08 0.0.96 Freebucks 每小时定价表（FREEBUCKS_SESSION_PRICES，
-# orchestrator.js 148890-148903）—— 小时价为"创建 session 一次性扣费"单位。
-# 免费档每日 Freebucks：full tier=100 / limited tier=25（FREEBUCKS_PLANS.free，
-# 148910-148927），每天太平洋午夜重置；deepseek-v4-flash 高峰 +10（至 3 AM PT）。
+# 🔴 2026-09-13 0.0.109 Freebucks 每小时定价表（FREEBUCKS_SESSION_PRICES，
+# orchestrator.js 149717-149732）—— 小时价为"创建 session 一次性扣费"单位。
+# 0.0.109 相对 0.0.96 的变化：
+#   - 峰值加价 `FREEBUCKS_PEAK_SURCHARGE = 20`（0.0.96 是 +10），仅 deepseek-v4-flash
+#     生效（`FREEBUCKS_PEAK_SURCHARGED_MODEL_IDS = [flash]`），至 3 AM PT；
+#   - limited 未付费档 `FREEBUCKS_LIMITED_UNPAID_PRICES = {flash: {offPeak: 25,
+#     peak: 40}}`（不在此表体现，属付费分级提示）；
+#   - solar-pro4 改**动态定价** `solarOfferAt().price`：09-09T15:49Z 起促销 **0**
+#     Freebucks（常态 5，SOLAR_REGULAR_OFFER）—— 当前 2026-09-13 按 0 记；
+#   - 订阅档每日 Freebucks（FREEBUCKS_PLANS，149741-149778）：
+#     full:  free 100 / starter 150+300 / plus 250+500 / pro 400+800
+#     limited: free 25 / starter 105+300 / plus 200+500 / pro 350+800
+#     每天太平洋午夜重置；kimi-k3-eco 与 luna-es 也在定价表（蜜罐，不计入建议）。
 FREEBUCKS_HOURLY_PRICES = {
     "z-ai/glm-5.3-flash": 5,
     "mimo/mimo-v2.5": 10,
-    "deepseek/deepseek-v4-flash": 15,
+    "deepseek/deepseek-v4-flash": 15,  # 高峰 +20（至 3 AM PT）；limited 未付费 25/40
     "openai/gpt-5.6-luna": 20,
     "openai/gpt-5.6-luna-es": 20,
-    "upstage/solar-pro4": 5,  # 常态 Solar PRO_4 offer=5（0 促销价已于 09-07 结束）
+    "upstage/solar-pro4": 0,  # 🔴 solarOfferAt 动态：当前促销 0（常态 5）
     "crof/kimi-k3-eco": 5,
     "meta/muse-spark-1.3-contributor": 15,
     "meta/muse-spark-1.2-contributor": 15,

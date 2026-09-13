@@ -116,6 +116,8 @@ class OpenAICompatTests(unittest.TestCase):
         # 🟢 2026-09-01 0.0.79：codebuff_metadata 必含 llm_step_number（反代单
         # turn 默认 "1"；官方 desktop 必带，缺失会被 detectForeignFreebuffClient
         # 视为非官方 run 模板）。
+        # 🔴 2026-09-13 0.0.109：客户端未传 effort 时回填官方 defaultEffort
+        # （pro 支持 effort → 回填 "high"），见 models.default_reasoning_effort_for。
         self.assertEqual(
             payload["codebuff_metadata"],
             {
@@ -126,6 +128,7 @@ class OpenAICompatTests(unittest.TestCase):
                 "client_id": "client-1",
                 "cost_mode": "free",
                 "llm_step_number": "1",
+                "freebuff_reasoning_effort": "high",
             },
         )
 
@@ -440,10 +443,11 @@ class OpenAICompatTests(unittest.TestCase):
             client_id="client-1",
         )
 
-        # flash official efforts: low/high/max；ultra 不对齐官方允许列表 → 回退默认 high
+        # flash official efforts: low/high/max；ultra 不对齐官方允许列表 → 回退默认
+        # 🔴 2026-09-13 0.0.109：flash 默认档按用户决策改 max（最大档）→ 回退 "max"
         # 且按官方 free-mode 传法放进 codebuff_metadata.freebuff_reasoning_effort
         self.assertNotIn("reasoning_effort", payload)
-        self.assertEqual(payload["codebuff_metadata"]["freebuff_reasoning_effort"], "high")
+        self.assertEqual(payload["codebuff_metadata"]["freebuff_reasoning_effort"], "max")
 
     def test_reasoning_effort_valid_value_passes_through(self) -> None:
         payload = build_upstream_payload(
@@ -486,8 +490,9 @@ class OpenAICompatTests(unittest.TestCase):
             client_id="client-1",
         )
 
-        # flash 官方 efforts 不含 medium → 字段不对齐，回退默认 high
-        self.assertEqual(payload["codebuff_metadata"]["freebuff_reasoning_effort"], "high")
+        # flash 官方 efforts 不含 medium → 字段不对齐，回退默认
+        # 🔴 2026-09-13 0.0.109：flash 默认档改 max（用户决策）→ 回退 "max"
+        self.assertEqual(payload["codebuff_metadata"]["freebuff_reasoning_effort"], "max")
 
     def test_glm_5_3_flash_default_effort_is_max_0_0_84(self) -> None:
         # 🟢 2026-09-02 0.0.84：GLM 5.3 Flash 默认 effort 从 "high" 升为 "max"，

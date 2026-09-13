@@ -36,28 +36,49 @@ class FreebuffModel:
         return self.session_model_id or self.upstream_id
 
 
-# 硬编码兜底表（2026-09-01 从官方 orchestrator.js 0.0.79 freebuff-models.ts 提取）。
+# 硬编码兜底表（2026-09-13 从官方 orchestrator.js 0.0.109 freebuff-models.ts 提取，
+# 即官方 SUPPORTED_FREEBUFF_MODELS 全集，排除 god-only 蜜罐 kimi/luna-es —— 它们只
+# 属于 FREEBUFF_WEB_GOD_ONLY_MODELS，绝不能进 /v1/models）。
 # 动态注册表刷新失败或官方源不可用时使用；正常情况下 resolve_model 优先查动态表。
 #
-# 🟢 2026-09-01 桌面版 0.0.79 复核落地：
-# - `FREEBUFF_PREMIUM_MODEL_IDS = [luna, solar-pro4]`（GLM 5.3 Flash 掉出 premium 池）
-# - `FREEBUFF_DESKTOP_PREMIUM_BUCKET_MODEL_IDS = [luna, glm-5.2, solar-pro4]`
-#   （GLM 5.3 Flash 在桌面端归 unlimited 通道）
-# - `DEFAULT_FREEBUFF_MODEL_ID = glm-5.3-flash`（luna 被挤到次位）
-# - 新增 `upstage/solar-pro4`：`premium:true` + 独立 daily 池（limit=1，
-#   spend=0.5 单位）+ 500K 上下文 + `experimental:true`（不支持 effort 调整）
-# - `anthropic/claude-fable-5` 重新出现：`premium:true` + `dataUse:training` +
-#   `isNew:true` + 完整 EFFORTS_THROUGH_MAX 档
+# 🔴 2026-09-13 0.0.109 复核落地（相对 0.0.96/0.0.84 的变化）：
+# - SUPPORTED_FREEBUFF_MODELS 顺序：**ox-alpha 升到首位**，pro 第 2 位；kimi-k3-eco
+#   与 luna-es 不在 SUPPORTED（仍是 WEB god-only 蜜罐，见 GOD_ONLY_MODEL_IDS）。
+# - `deepseek/deepseek-v4-flash`：displayName 改「DeepSeek **V4.1** Flash」、premium:false、
+#   multimodal:true、`unavailableFallback: luna`、`isNew:true`；efforts 仍
+#   [low, high, max]。**用户决策 2026-09-13：中转默认思考深度改 max**（官方 max 档
+#   合法，见 default_reasoning_effort_for）。
+# - `deepseek/deepseek-v4-pro`：**premium 回归 true**（0.0.96 为 false），但因不在
+#   FREEBUFF_MODELS（premium 池源）→ 并发仍走 multi-tab（unlimited）通道。
+# - `FREEBUFF_MODELS`（premium 池源）= [glm-5.3-flash, flash, luna, mimo,
+#   solar-pro4, muse-1.2] → 推导 premium 池 = [luna, muse-1.2]（与 0.0.96 一致）。
+# - `LIMITED_FREEBUFF_MODEL_IDS = [glm-5.3-flash, flash, mimo, solar-pro4]`
+#   （0.0.96 仅 [mimo]，0.0.109 扩到 4 个；limited hero = glm-5.3-flash）。
+# - `FREEBUFF_MODEL_CONTEXT_WINDOWS` 表（100813-100823）全量收录（含 m3=524288、
+#   pro/flash=1048576、luna/luna-es/muse/ox/glm-5.3=1e6/372000、solar=500000）。
+# - `GLM_V53_FLASH_REASONING_EFFORTS = ["low", "high", "max"]`（0.0.84 已扩）、
+#   defaultEffort="max"、reasoningEffort="max" —— 保持 3 档 max。
+# - `FREEBUFF_SOLAR_PRO_4_ENTITLEMENT.fullAccess.premium = false`（保持 0.0.96 语义），
+#   Freebucks 定价走动态 solarOfferAt（当前 2026-09-13 促销价 0）。
+# - GLM 5.2 仍 referral 解锁 + streak 加成（FREEBUFF_REWARD_MODEL_ID= glm-5.3-flash）。
 FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
+    # --- 官方 SUPPORTED_FREEBUFF_MODELS（0.0.109）顺序逐项对齐 ---
+    # 2026-08-26 新增：ox-alpha，Anonymous provider，premium:false，1M 上下文，
+    # multimodal:true，efforts=[low, high, max]，defaultEffort="high"（orchestrator.js
+    # 100974-100986）。0.0.109 SUPPORTED 首位。
     FreebuffModel(
-        "deepseek/deepseek-v4-flash",
-        "base2-free-deepseek-flash",
-        base3_agent_id="base3-free-deepseek-flash",
-        reviewer_agent_id="code-reviewer-deepseek-flash",
-        context_window=1_048_576,
+        "stealth/ox-alpha",
+        "base2-free-ox-alpha",
+        base3_agent_id="base3-free-ox-alpha",
+        reviewer_agent_id="code-reviewer-ox-alpha",
+        context_window=1_000_000,
+        input_modalities=("text", "image"),
         reasoning_efforts=("low", "high", "max"),
         default_reasoning_effort="high",
     ),
+    # 0.0.109：premium 回归 true（0.0.96 false）；multimodal:false；dataUse:"training"
+    # （warning "May use data for AI training"）；efforts=[low, high, max]、
+    # defaultEffort="high"。不在 FREEBUFF_MODELS → 并发走 multi-tab（unlimited）。
     FreebuffModel(
         "deepseek/deepseek-v4-pro",
         "base2-free-deepseek",
@@ -67,13 +88,7 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reasoning_efforts=("low", "high", "max"),
         default_reasoning_effort="high",
     ),
-    FreebuffModel(
-        "mimo/mimo-v2.5",
-        "base2-free-mimo",
-        base3_agent_id="base3-free-mimo",
-        reviewer_agent_id="code-reviewer-mimo",
-        context_window=131_072,
-    ),
+    # minimax-m3：premium:true，multimodal:true，tagline "Fastest"，无 efforts。
     FreebuffModel(
         "minimax/minimax-m3",
         "base2-free-minimax-m3",
@@ -82,58 +97,22 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         context_window=524_288,
         input_modalities=("text", "image"),
     ),
+    # gpt-5.6-luna：premium:true，multimodal:true，efforts=EFFORTS_THROUGH_MAX、
+    # defaultEffort="high"（FREEBUFF_GPT_5_6_LUNA_REASONING_EFFORT）。premium 池成员。
     FreebuffModel(
         "openai/gpt-5.6-luna",
         "base2-free-luna",
         base3_agent_id="base3-free-luna",
         reviewer_agent_id="code-reviewer-luna",
         context_window=1_000_000,
+        input_modalities=("text", "image"),
         reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
         default_reasoning_effort="high",
     ),
-    FreebuffModel(
-        "z-ai/glm-5.2",
-        "base2-free-glm",
-        base3_agent_id="base3-free-glm",
-        reviewer_agent_id="code-reviewer-glm",
-        context_window=131_072,
-    ),
-    # 2026-09-01 0.0.79 复核：GLM 5.3 Flash 不在 `FREEBUFF_PREMIUM_MODEL_IDS`（即
-    # `premium:false`），但仍在 `FREEBUFF_DESKTOP_MODELS`（桌面端 unlimited 通道）；
-    # 不在 `FREEBUFF_PER_MODEL_SESSION_CAPS` 也不再有 `glm_v53_flash` 池（0.0.79
-    # 已删除），但官方为它单独定义 `GLM_V53_FLASH_REASONING_EFFORTS = ["low", "high"]`
-    # （仅 2 档，比 EFFORTS_THROUGH_MAX 收紧）。
-    #
-    # 🟢 2026-09-02 0.0.84 复核（orchestrator.js 87391 / 87485-87488）：官方将
-    # `GLM_V53_FLASH_REASONING_EFFORTS` 从 `["low", "high"]` 扩为 `["low", "high", "max"]`，
-    # 与 DEEPSEEK_V4 / OX_ALPHA 看齐；模型声明 `reasoningEffort:"max"`、
-    # `defaultEffort:"max"`（**0.0.79 是 "high"，0.0.84 升到 "max"**）。
-    # 同时新增 reward/streak 机制（`FREEBUFF_REWARD_MODEL_ID = GLM_V53_FLASH`）：
-    # 用户的 rateLimitsByModel[glm-5.3-flash].limit > 0 即视为"已解锁 referral 权益"，
-    # 触发 streak bonus 计数（不再依赖 `z-ai/glm-5.2` 单模型）。
-    # 对反代影响：GLM_POOL 预检仍以 `glm-5.2` 为 referral 门，但客户端可凭
-    # `glm-5.3-flash` 拿到独立奖励池（不影响我们的 fail-fast 逻辑）。
-    FreebuffModel(
-        "z-ai/glm-5.3-flash",
-        "base2-free-glm-5-3-flash",
-        base3_agent_id="base3-free-glm-5-3-flash",
-        reviewer_agent_id="code-reviewer-glm-5-3-flash",
-        context_window=1_000_000,
-        input_modalities=("text", "image"),
-        reasoning_efforts=("low", "high", "max"),  # 🟢 0.0.84：扩为 3 档
-        default_reasoning_effort="max",  # 🟢 0.0.84：从 "high" 升 "max"
-    ),
-    # 2026-09-01 0.0.79 新增：Solar Pro 4（upstage/solar-pro4）
-    # - 当时 `FREEBUFF_PREMIUM_MODEL_IDS` 成员（premium:true），独立 daily 池
-    #   `solar_pro4`（limit=1），单 session 消耗 0.5 单位额度
-    # - `experimental:true` + `multimodal:false` + 上下文 500,000 + 不支持 effort 调整
-    # - 不带 `warning` 字段（不告训练）
-    #
-    # 🟢 2026-09-08 0.0.96 复核：`FREEBUFF_SOLAR_PRO_4_ENTITLEMENT.fullAccess.premium = !1`
-    #   → **premium 掉回 false**（0.0.96 起 solar-pro4 归 multi-tab 无限通道，改走
-    #   Freebucks 计费：「0 Freebucks Labor Day weekend (through Sep 7 PT)」→
-    #   「5 Freebucks」常态定价）。per-model spend cap 也移出（改给 gemini-3.8-flash）。
-    #   并发桶语义见 model_registry（slot-bound 列表已不含 solar-pro4）。
+    # Solar Pro 4：0.0.109 `FREEBUFF_SOLAR_PRO_4_ENTITLEMENT.fullAccess.premium = false`，
+    # multimodal:false，上下文 500,000，不支持 effort 调整（experimental）。
+    # Freebucks 按 solarOfferAt() 动态定价：09-09T15:49Z 起促销 **0** Freebucks
+    # （常态 5，SOLAR_REGULAR_OFFER）。0.0.96 起在桌面端走 multi-tab 无限通道。
     FreebuffModel(
         "upstage/solar-pro4",
         "base2-free-solar-pro4",
@@ -143,56 +122,10 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         # reasoning_efforts 留空 → 客户端传 effort 时由 normalize_reasoning_effort
         # 直接返回 None，不发送 effort 字段（避免触发 foreign_client）。
     ),
-    FreebuffModel(
-        "crof/kimi-k3-eco",
-        "base2-free-kimi-k3-eco",
-        base3_agent_id="base3-free-kimi-k3-eco",
-        context_window=131_072,
-    ),
-    # 2026-09-01 0.0.79 复核：`claude-fable-5` 重新出现在 SUPPORTED_FREEBUFF_MODELS
-    # 末尾，`isNew:true` + `dataUse:"training"`（**官方会用 prompts 训练**，需警告用户）
-    # + `premium:true` + EFFORTS_THROUGH_MAX 档位。Web/CLI 完整可见；桌面端不在
-    # FREEBUFF_DESKTOP_MODELS（仍是 CLI limited offer）。
-    FreebuffModel(
-        "anthropic/claude-fable-5",
-        "base2-free-fable",
-        base3_agent_id="base3-free-fable",
-        reviewer_agent_id="code-reviewer-fable",
-        context_window=131_072,
-        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
-        default_reasoning_effort="high",
-    ),
-    FreebuffModel(
-        "meta/muse-spark-1.2-contributor",
-        "base2-free-muse-spark",
-        base3_agent_id="base3-free-muse-spark",
-        context_window=1_000_000,
-        reasoning_efforts=("minimal", "low", "medium", "high", "xhigh"),
-        default_reasoning_effort="xhigh",
-    ),
-    # 2026-08-26 新增：ox-alpha，Anonymous provider，premium: false，1M 上下文
-    FreebuffModel(
-        "stealth/ox-alpha",
-        "base2-free-ox-alpha",
-        base3_agent_id="base3-free-ox-alpha",
-        reviewer_agent_id="code-reviewer-ox-alpha",
-        context_window=1_000_000,
-        reasoning_efforts=("low", "high", "max"),
-        default_reasoning_effort="high",
-    ),
-    # 🟢 2026-09-08 0.0.96 新增：Gemini 3.8 Flash（google/gemini-3.8-flash）
-    # - `premium:true` + `multimodal:true` + `isNew:true`，efforts=EFFORTS_THROUGH_MAX、
-    #   defaultEffort="high"（orchestrator.js 100486-100496）
-    # - **订阅目录专属**：`FREEBUFF_PRO_ONLY_CATALOG_MODEL_IDS = [gemini-3.8-flash]`，
-    #   `LIMITED_TIER_PLAN_ONLY_MODEL_IDS = [luna, gemini-3.8-flash]`，
-    #   `PLAN_METERED_CATALOG_MODEL_IDS` 成员（100648-100689）
-    # - 桌面端 **slot-bound** 模型（`FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS` 成员），
-    #   单 session 消耗 0.5 单位额度（`FREEBUFF_PER_MODEL_SESSION_SPEND_CAPS`，顶替
-    #   solar-pro4）；不在 `FREEBUFF_MODELS`（public 桌面集合）
-    # - agent 三映射：base2-free-gemini-3-8-flash / base3-free-gemini-3-8-flash /
-    #   code-reviewer-gemini-3-8-flash（149702 / 149720 / 149751）
-    # - ⚠️ 官方 ctx 常量表（FREEBUFF_MODEL_CONTEXT_WINDOWS）未收录，tagline 标
-    #   "1M context" → 按 1_000_000 暂记，待活体测试确认
+    # gemini-3.8-flash：premium:true / multimodal:true / isNew:true，efforts=
+    # EFFORTS_THROUGH_MAX、defaultEffort="high"。FREEBUFF_PRO_ONLY_CATALOG_MODEL_IDS
+    # 唯一成员 + PLAN_METERED + slot-bound（单 session spend 0.5，顶替 solar-pro4）。
+    # ctx 官方常量表未收录，tagline "1M context" → 1_000_000 暂记。
     FreebuffModel(
         "google/gemini-3.8-flash",
         "base2-free-gemini-3-8-flash",
@@ -203,14 +136,9 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
         default_reasoning_effort="high",
     ),
-    # 🟢 2026-09-08 0.0.96 新增：Muse Spark 1.3（meta/muse-spark-1.3-contributor）
-    # - `premium:true` + `dataUse:training` + `isNew:true`，efforts=EFFORTS_THROUGH_XHIGH、
-    #   defaultEffort="xhigh"（orchestrator.js 100561-100574）；1.2→1.3 平替文案提示
-    # - 桌面端 **slot-bound** 模型（`FREEBUFF_DESKTOP_SLOT_BOUND_MODEL_IDS` 成员，
-    #   muse-spark 1.2/1.3 都在）；`UNTRACED_TRAINING_MODEL_IDS` 成员（训练但不 trace）
-    # - agent：base2-free-muse-spark-1-3 / base3-free-muse-spark-1-3 /
-    #   code-reviewer-muse-spark-1-3（149737 / 149718 / 149753）
-    # - ctx 常量表同未收录，按 muse-spark-1.2 的 1M 对齐暂记
+    # muse-spark-1.3：premium:true / dataUse:training / isNew:true，
+    # efforts=EFFORTS_THROUGH_XHIGH、defaultEffort="xhigh"；slot-bound 成员；
+    # UNTRACED_TRAINING_MODEL_IDS 成员；队列长回退 "DeepSeek V4.1 Flash"。
     FreebuffModel(
         "meta/muse-spark-1.3-contributor",
         "base2-free-muse-spark-1-3",
@@ -220,12 +148,80 @@ FREEBUFF_MODELS: tuple[FreebuffModel, ...] = (
         reasoning_efforts=("minimal", "low", "medium", "high", "xhigh"),
         default_reasoning_effort="xhigh",
     ),
+    # muse-spark-1.2：premium:true / dataUse:training，同上 efforts=xhigh；slot-bound。
+    FreebuffModel(
+        "meta/muse-spark-1.2-contributor",
+        "base2-free-muse-spark",
+        base3_agent_id="base3-free-muse-spark",
+        context_window=1_000_000,
+        reasoning_efforts=("minimal", "low", "medium", "high", "xhigh"),
+        default_reasoning_effort="xhigh",
+    ),
+    # glm-5.2：premium:true，multimodal:false，referral 解锁 + streak 加成；
+    # 独立日池，绝不落入共享 premium 日额度（GLM_POOL fail-fast 门）。
+    FreebuffModel(
+        "z-ai/glm-5.2",
+        "base2-free-glm",
+        base3_agent_id="base3-free-glm",
+        reviewer_agent_id="code-reviewer-glm",
+        context_window=131_072,
+    ),
+    # glm-5.3-flash：0.0.84 起 efforts 扩为 [low, high, max]、reasoningEffort/
+    # defaultEffort="max"（0.0.109 保持，orchestrator.js 100905-100916）；premium:false
+    # → multi-tab 无限通道；multimodal:true；FREEBUFF_REWARD_MODEL_ID（referral 权益
+    # 等价解锁 streak 计数）；官方 DEFAULT_FREEBUFF_MODEL_ID。
+    FreebuffModel(
+        "z-ai/glm-5.3-flash",
+        "base2-free-glm-5-3-flash",
+        base3_agent_id="base3-free-glm-5-3-flash",
+        reviewer_agent_id="code-reviewer-glm-5-3-flash",
+        context_window=1_000_000,
+        input_modalities=("text", "image"),
+        reasoning_efforts=("low", "high", "max"),
+        default_reasoning_effort="max",
+    ),
+    # deepseek-v4-flash：0.0.109 displayName "DeepSeek V4.1 Flash"、premium:false、
+    # multimodal:true、unavailableFallback=luna、isNew:true；efforts=[low, high, max]、
+    # defaultEffort="high"。🔴 用户决策 2026-09-13：中转默认思考深度改 **max**
+    # （官方最大档，见 default_reasoning_effort_for）。Freebucks 15/时，高峰 +20
+    # （至 3 AM PT，limited 未付费档 25/40）。
+    FreebuffModel(
+        "deepseek/deepseek-v4-flash",
+        "base2-free-deepseek-flash",
+        base3_agent_id="base3-free-deepseek-flash",
+        reviewer_agent_id="code-reviewer-deepseek-flash",
+        context_window=1_048_576,
+        input_modalities=("text", "image"),
+        reasoning_efforts=("low", "high", "max"),
+        default_reasoning_effort="max",  # 🔴 用户决策：默认按官方最大档 max
+    ),
+    # mimo-v2.5：premium:false，multimodal:true，无 efforts（不干预）；
+    # FALLBACK_FREEBUFF_MODEL_ID 兜底模型。
+    FreebuffModel(
+        "mimo/mimo-v2.5",
+        "base2-free-mimo",
+        base3_agent_id="base3-free-mimo",
+        reviewer_agent_id="code-reviewer-mimo",
+        context_window=131_072,
+        input_modalities=("text", "image"),
+    ),
+    # claude-fable-5：SUPPORTED 末尾，premium:true / dataUse:"training"（**官方会用
+    # prompts 训练**）+ multimodal:true + efforts=EFFORTS_THROUGH_MAX、
+    # defaultEffort="high"。桌面端不在 FREEBUFF_DESKTOP_MODELS（CLI limited offer）。
+    FreebuffModel(
+        "anthropic/claude-fable-5",
+        "base2-free-fable",
+        base3_agent_id="base3-free-fable",
+        reviewer_agent_id="code-reviewer-fable",
+        context_window=131_072,
+        input_modalities=("text", "image"),
+        reasoning_efforts=("low", "medium", "high", "xhigh", "max"),
+        default_reasoning_effort="high",
+    ),
 )
 
-# 默认模型：0.0.79 官方改为 `glm-5.3-flash`（不再用 luna）。
-# 落在 FREEBUFF_MODELS 列表内位置不变（按官方 SUPPORTED_FREEBUFF_MODELS 顺序）。
-# 注：FREEBUFF_MODELS 列表顺序保留 deepseek-v4-flash 在首位（与 0.0.63 一致以避免
-# 重新部署导致客户端默认模型抖动）；实际 DEFAULT_MODEL 显式指向 glm-5.3-flash。
+# 默认模型：官方 `DEFAULT_FREEBUFF_MODEL_ID = glm-5.3-flash`（含
+# 2026-09-05 迁移；PREVIOUS_DEFAULT_FREEBUFF_MODEL_ID = deepseek-v4-flash）。
 DEFAULT_MODEL = next(m for m in FREEBUFF_MODELS if m.id == "z-ai/glm-5.3-flash")
 
 # 官方 desktop session bucket 的**硬编码兜底**（仅动态注册表不可用时生效）。
@@ -248,18 +244,25 @@ DEFAULT_MODEL = next(m for m in FREEBUFF_MODELS if m.id == "z-ai/glm-5.3-flash")
 UNLIMITED_SESSION_MODEL_IDS = frozenset(
     {
         "mimo/mimo-v2.5",
-        # 2026-09-01 0.0.79：pro 与 m3 仍在 official premium 池之外 → 桌面端
-        # unlimited 通道，兜底同步跟进（动态表为准）
+        # 🔴 2026-09-13 0.0.109：pro 在 SUPPORTED 里 premium 回归 true，但不在 premium
+        # 池源 FREEBUFF_MODELS → 桌面端仍走 multi-tab（unlimited）通道，兜底保留。
         "deepseek/deepseek-v4-pro",
         "minimax/minimax-m3",
-        # 2026-08-26：flash 一直为 unlimited 通道
+        # 2026-08-26：flash 一直为 unlimited 通道（0.0.109 premium:false）
         "deepseek/deepseek-v4-flash",
         # 2026-08-26：ox-alpha 为 premium:false 的免费模型
         "stealth/ox-alpha",
         # 2026-09-01 0.0.79：GLM 5.3 Flash 从 premium 池移除，归 unlimited 通道
         "z-ai/glm-5.3-flash",
+        # 🔴 2026-09-13 0.0.109：GLM 5.2 premium:true 但不进 slot-bound/premium 池源 →
+        # 桌面端 multi-tab（unlimited），兜底补集补齐。
+        "z-ai/glm-5.2",
         # 🟢 2026-09-08 0.0.96：solar-pro4 premium → false，归 multi-tab 无限通道
         "upstage/solar-pro4",
+        # 🔴 2026-09-13 0.0.109：fable-5 premium:true 但不在 FREEBUFF_MODELS（premium 池
+        # 源）→ 桌面端 multi-tab（unlimited）。gemini-3.8 / luna / muse-1.2 / muse-1.3
+        # 为 slot-bound（premium 槽），**不**在此补集。
+        "anthropic/claude-fable-5",
     }
 )
 
@@ -548,6 +551,29 @@ def normalize_reasoning_effort(model_id: str | None, effort: str | None) -> str 
     if requested in allowed:
         return requested
     return default
+
+
+def default_reasoning_effort_for(model_id: str | None) -> str | None:
+    """客户端**未传** effort 时回填官方默认档（走 ``codebuff_metadata``）。
+
+    🔴 2026-09-13 用户决策（0.0.109）：官方客户端免费模式下用户不动档位时，
+    ``turn.effort`` 为 null 且**不发送** ``freebuff_reasoning_effort``（orchestrator.js
+    150233）。但我们落地"服务端替用户显式选档"：
+    - deepseek-v4-flash 的 ``default_reasoning_effort`` 已按用户要求设为 **max**
+      （官方 DEEPSEEK_V4_REASONING_EFFORTS 最大档，合法），不传 effort 即发 max；
+    - 其余支持 effort 的模型（glm-5.3-flash/luna/muse/ox/gemini/fable/pro）按其官方
+      ``defaultEffort`` 回填（都是官方允许列表内的值，不构成外来指纹）；
+    - 官方不支持 effort 的模型（mimo/minimax/solar 等）或未知模型 → 返回 None，不发。
+    """
+    if not model_id:
+        return None
+    try:
+        model = resolve_model(model_id)
+    except ValueError:
+        return None
+    if not model.reasoning_efforts or model.default_reasoning_effort is None:
+        return None
+    return model.default_reasoning_effort
 
 
 # 运行时动态注册表：模块导入即创建，并启动后台线程抓取一次官方模型映射。

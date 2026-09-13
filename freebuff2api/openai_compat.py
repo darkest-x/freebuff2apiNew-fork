@@ -11,7 +11,7 @@ from .official_tools import rewrite_tools_for_upstream
 from .tool_schema import normalize_tool_schemas
 
 logger = logging.getLogger("freebuff2api.openai_compat")
-from .models import normalize_reasoning_effort, resolve_model
+from .models import default_reasoning_effort_for, normalize_reasoning_effort, resolve_model
 
 
 # 官方 free-mode marker（0.0.79 桌面版抓包确认）：system 必须以官方 Buffy 编码 agent
@@ -341,6 +341,12 @@ def build_upstream_payload(
         reasoning_effort = normalize_reasoning_effort(
             body.get("model"), reasoning_effort
         )
+    else:
+        # 🔴 2026-09-13 用户决策（0.0.109）：客户端未传 effort 时不再"静默不发"，
+        # 而是回填该模型的官方 defaultEffort（deepseek-v4-flash 已设为 max）。
+        # 官方 free-mode 的 freebuff_reasoning_effort 字段值都在模型 efforts 允许
+        # 列表内，显式选档不构成外来指纹（见 models.default_reasoning_effort_for）。
+        reasoning_effort = default_reasoning_effort_for(body.get("model"))
 
     # 钳制输出上限（chat completions 路径，对齐 anthropic 路径行为）
     clamp_output_tokens(payload, body.get("model"))
