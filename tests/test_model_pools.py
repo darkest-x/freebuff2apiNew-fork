@@ -164,6 +164,33 @@ class SessionBucketTests(unittest.TestCase):
     def test_empty_model_defaults_premium(self) -> None:
         self.assertEqual(session_bucket_for_model(""), "premium")
 
+    def test_dynamic_table_empty_pools_fallback_to_hardcoded_0_0_109(self) -> None:
+        # 🔴 2026-09-13 0.0.109 回归：官方 FREEBUFF_PREMIUM_MODEL_IDS 是推导式
+        # `Object.freeze(FREEBUFF_MODELS.filter(...))`，静态解析器拿不到 →
+        # 快照 premium_ids / desktop_bucket_ids 常为空集。若把空集当权威
+        # "清空池"，luna/muse 也判 unlimited，与官方 slot-bound 语义背离。
+        # 修复：空动态池 → 回退硬编码 UNLIMITED 补集（luna/gemini-3.8/muse → premium）。
+        registry = ModelRegistry()
+        registry._table = DynamicModelTable(
+            models=[DynamicModelEntry(id=m, agent_id="a") for m in ["openai/gpt-5.6-luna"]],
+            premium_ids=set(),
+            desktop_bucket_ids=set(),
+            glm_ids=set(),
+        )
+        set_model_registry(registry)
+        try:
+            # premium 补集语义（硬编码兜底）：不在 UNLIMITED 的 → premium
+            self.assertEqual(session_bucket_for_model("openai/gpt-5.6-luna"), "premium")
+            self.assertEqual(session_bucket_for_model("google/gemini-3.8-flash"), "premium")
+            self.assertEqual(session_bucket_for_model("meta/muse-spark-1.3-contributor"), "premium")
+            # UNLIMITED 成员 → unlimited
+            self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-flash"), "unlimited")
+            self.assertEqual(session_bucket_for_model("deepseek/deepseek-v4-pro"), "unlimited")
+            self.assertEqual(session_bucket_for_model("z-ai/glm-5.2"), "unlimited")
+            self.assertEqual(session_bucket_for_model("anthropic/claude-fable-5"), "unlimited")
+        finally:
+            set_model_registry(None)
+
     def test_glm_pool_constant_documented(self) -> None:
         # GLM 独立额度池的记录常量（并发桶上仍属 premium，见 session_bucket_for_model docstring）
         self.assertIn("z-ai/glm-5.2", GLM_POOL_MODEL_IDS)

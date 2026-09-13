@@ -314,6 +314,12 @@ def _dynamic_premium_ids() -> frozenset[str] | None:
     ENTITLEMENT premium:false 掉出）。桌面端并发槽判定优先走 desktop_bucket_ids
     （slot-bound = [luna, gemini-3.8-flash, muse-spark-1.3, muse-spark-1.2]），见
     :func:`session_bucket_for_model`。
+
+    🔴 2026-09-13 0.0.109：快照 premium_ids / desktop_bucket_ids 双双为空时，
+    返回**空集**（非 None）会被调用方误当成"官方 premium 池被清空"→ 全部判
+    unlimited。实际原因是解析器对 `Object.freeze(FREEBUFF_MODELS.filter(...))`
+    推导式无能为力。调用方（session_bucket_for_model）已把空集视为"未提供"，
+    回退硬编码兜底（镜像官方 slot-bound/premium 补集）。
     """
     registry = get_model_registry()
     if registry is None or registry.table is None:
@@ -340,12 +346,18 @@ def session_bucket_for_model(model: str) -> str:
     """返回官方 desktop session bucket：``premium``（slot-bound 槽）或 ``unlimited``
     （multi-tab 槽）。
 
-    判定优先级（🟢 2026-09-08 0.0.96 更新）：
+    判定优先级（🟢 2026-09-08 0.0.96 更新；🔴 2026-09-13 0.0.109 修正空池回退）：
     1. 动态表的 desktop_bucket_ids —— 官方桌面端 slot-bound 并发桶（0.0.96 =
        [luna, gemini-3.8-flash, muse-spark-1.3, muse-spark-1.2]）在池间挪动时
        自动跟随，无需改代码部署；solar-pro4 / glm-5.2 不在其中 → multi-tab（unlimited）；
-    2. 动态表 premium_ids（0.0.96 推导 = [luna, muse-spark-1.2]，以 snapshot 承载）；
-    3. 硬编码 UNLIMITED_SESSION_MODEL_IDS 兜底（注册表不可用时）。
+    2. 动态表 premium_ids（0.0.96 推导 = [luna, muse-spark-1.2]，以 snapshot 承载）。
+       ⚠️ **空集视为"未提供"**：官方 0.0.96+ 的 `FREEBUFF_PREMIUM_MODEL_IDS` 是
+       `Object.freeze(FREEBUFF_MODELS.filter(...))` 推导式，静态解析器拿不到，快照
+       里 premium_ids 常为空 —— 若把空集当权威"清空池"，luna/muse 也判 unlimited，
+       与官方 slot-bound 语义背离（此前 bug，2026-09-13 修复）→ 空集回退第 3 步；
+    3. 硬编码 UNLIMITED_SESSION_MODEL_IDS 兜底（注册表不可用或动态池为空时）。
+       该集合是官方 premium/slot-bound 池的**补集**：不在其中的 luna、gemini-3.8、
+       muse-1.2/1.3 判 premium，其余判 unlimited。
 
     ⚠️ 旧实现把 FREEBUFF_WEB_PREMIUM_MODEL_IDS 混入 premium_ids，导致
     glm-5.3-flash / kimi / luna-es / muse 被误判 premium bucket —— 已修复
@@ -357,7 +369,7 @@ def session_bucket_for_model(model: str) -> str:
     if bucket_ids is not None:
         return "premium" if model in bucket_ids else "unlimited"
     dynamic = _dynamic_premium_ids()
-    if dynamic is not None:
+    if dynamic is not None and dynamic:
         return "premium" if model in dynamic else "unlimited"
     if model in UNLIMITED_SESSION_MODEL_IDS:
         return "unlimited"
