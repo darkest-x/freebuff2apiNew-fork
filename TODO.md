@@ -93,6 +93,34 @@
     `tests/test_notices.py`：新增 turn_spend_limit 长/短两个用例。
 - 测试：`tests/` 全套通过 **257 passed**（0.0.86 的 255 + 0.0.96 新增 2）。
 
+### 0c. 2026-09-13 桌面版 0.0.109 复核（session admission 新端点 + 新头）
+- 状态：**已完成**（codebuff.py 端点/头更新 + 测试，提交见本次 commit）
+- 官方桌面版 0.0.109（09-12 12:49 安装，orchestrator.js 10,488,815 B）与 0.0.96 diff：
+  - **常量 115 → 122**（+7 / -0）：新增 `FREEBUFF_SESSION_ADMISSION_PATH`、
+    `FREEBUFF_WALLET_SPEND_LIMIT_HEADER` / `FREEBUFF_DESKTOP_ATTEMPT_HEADER` /
+    `FREEBUFF_DESKTOP_ADMITTED_AT_HEADER` / `FREEBUFF_PURCHASE_CONTINUITY_HEADER` /
+    `FREEBUFF_SESSION_UNSUPPORTED_MESSAGE` / `FREEBUFF_BYOK_CONFIG_DIR`。
+  - **会话创建端点迁移（协议级）**：`POST /api/v1/freebuff/session` →
+    **`POST /api/v1/freebuff/session/admission`**（orchestrator.js 101042 /
+    169480-169511 postSessionAdmission）。新头：
+    - `x-freebuff-wallet-spend-limit: "0"`（无消费同意时 0，免费用户即 "0"）
+    - `x-freebuff-purchase-continuity: "1"`（购买连续性）
+    - `x-freebuff-desktop-attempt-id: <uuid>`（每次 admission 幂等尝试 id，重试沿用）
+    - 404/405 → `server_error` + "SESSION_UNSUPPORTED_MESSAGE"（服务端未升级降级提示）
+  - **DELETE /session 不变**，但无 attempt receipt 时新增 `x-freebuff-purchase-continuity: 1`
+    （orchestrator.js 169556）；GET 心跳/refresh-tier 路径不变；
+    新增 `GET /session?refundClaim=...`（退款，反代不需要）。
+  - **额度/并发/模型层无变化**：FREEBUCKS_SESSION_PRICES、FREEBUCKS_PLANS、
+    slot-bound 并发、premium 推导池、DEFAULT=glm-5.3-flash 全部与 0.0.96 一致。
+  - **`SESSION_RETRY_AFTER_CAP_MS = 10000`**（0.0.96 是 3000）；
+    **`FREEBUFF_DESKTOP_IDLE_RELEASE_MS = 900000`**（15 分钟，0.0.96 是 600000）。
+  - **BYOK**：`~/.config/freebuff/byok/connections.json`（自带 key 模式，反代无关）。
+- **对反代的修改**：
+  - `codebuff.py`：create_session POST 路径 → `/admission` + 3 新头（attempt-id 复用
+    于 premium_slot_taken 重试）；delete_session 加 purchase-continuity；
+  - `tests/test_codebuff_client.py`：POST 断言更新；
+- 测试：定向 25 passed；全套待确认。
+
 ### 1. 模型列表补齐(对齐 Worker 1.7.2 MODELS 表)
 - 状态：**已完成** — `freebuff2api/models.py` 补 8 个新模型：
   `openai/gpt-5.6-luna`、`z-ai/glm-5.2`、`poolside/laguna-s-2.1`、`openrouter/poolside/laguna-s-2.1`、`inclusionai/ling-3.0-flash:free`、`crof/greg-2-ultra`、`crof/greg-2-super`、`anthropic/claude-fable-5`、`meta/muse-spark-1.2-contributor`

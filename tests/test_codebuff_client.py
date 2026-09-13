@@ -115,7 +115,8 @@ class CodebuffClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             client.calls,
             [
-                ("POST", "/api/v1/freebuff/session"),
+                # 🟢 2026-09-13 0.0.109：POST 创建迁到 /session/admission
+                ("POST", "/api/v1/freebuff/session/admission"),
                 ("GET", "/api/v1/freebuff/session"),
             ],
         )

@@ -377,26 +377,33 @@ class CodebuffClient:
         # 桌面版签名（对齐 Worker 1.7.0）：客户端预生成 instance-id，服务端据此绑定会话，
         # 避免旧版"服务端分配实例"特征被 detectForeignFreebuffClient 标记。
         instance_id = str(uuid.uuid4())
-        # 🟢 2026-09-01 0.0.79 复核：POST /session 头严格按 orchestrator.js 125469-125475：
+        # 🟢 2026-09-13 0.0.109 复核：POST 创建会话迁移到 `/api/v1/freebuff/session/admission`
+        # （orchestrator.js 101042 / 169480-169511 postSessionAdmission），新增/调整头：
         #   authorization
         #   x-freebuff-model
+        #   x-freebuff-wallet-spend-limit: "0"   ← 无消费同意(consent)时为 0，免费用户即 "0"
         #   x-freebuff-instance-id
+        #   x-freebuff-purchase-continuity: "1"   ← 购买连续性标记（0.0.109 新增）
+        #   x-freebuff-desktop-attempt-id: <uuid> ← 每次 admission 尝试的幂等 id，重试复用
         #   x-freebuff-multi-session: 1
-        #   [可选] x-freebuff-takeover-instance-id: <id>（抢占时才有）
-        # **不带** x-freebuff-heartbeat（那是 GET 心跳路径才有）
-        # **不带** x-freebuff-include-unused-rate-limits（那是 GET refresh-tier 路径）
-        # **不带** x-freebuff-acting-user-id（chat 路径才有，且 UUID 来源尚未确认）
+        #   [可选] x-freebuff-takeover-instance-id（抢占时才有）
+        # **不带** x-freebuff-heartbeat / x-freebuff-include-unused-rate-limits /
+        # x-freebuff-acting-user-id（理由同 0.0.79，见下）。
+        attempt_id = str(uuid.uuid4())  # 幂等尝试标识：重试同一次准入沿用同一 id
         headers = self._headers(
             extra={
                 "x-freebuff-model": model,
+                "x-freebuff-wallet-spend-limit": "0",
                 "x-freebuff-instance-id": instance_id,
+                "x-freebuff-purchase-continuity": "1",
+                "x-freebuff-desktop-attempt-id": attempt_id,
                 "x-freebuff-multi-session": "1",
             }
         )
         try:
             data = await self._json(
                 "POST",
-                "/api/v1/freebuff/session",
+                "/api/v1/freebuff/session/admission",
                 headers=headers,
             )
         except CodebuffError as error:
@@ -416,7 +423,7 @@ class CodebuffClient:
             await self.delete_session(current_instance_id)
             data = await self._json(
                 "POST",
-                "/api/v1/freebuff/session",
+                "/api/v1/freebuff/session/admission",
                 headers=headers,
             )
         # 缓存 admission 快照：POST /session 响应自带 rateLimitsByModel
@@ -515,6 +522,9 @@ class CodebuffClient:
         extra = {"x-freebuff-multi-session": "1"}
         if instance_id:
             extra["x-freebuff-instance-id"] = instance_id
+        # 🟢 2026-09-13 0.0.109：无 attempt receipt 的释放路径带
+        # `x-freebuff-purchase-continuity: 1`（orchestrator.js 169556）
+        extra["x-freebuff-purchase-continuity"] = "1"
         await self._json(
             "DELETE",
             "/api/v1/freebuff/session",
